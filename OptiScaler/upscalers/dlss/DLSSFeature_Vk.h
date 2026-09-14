@@ -8,14 +8,14 @@ class DLSSFeatureVk : public DLSSFeature, public IFeature_Vk
 {
   private:
   protected:
-  public:
-    bool Init(VkInstance InInstance, VkPhysicalDevice InPD, VkDevice InDevice, VkCommandBuffer InCmdList,
-              PFN_vkGetInstanceProcAddr InGIPA, PFN_vkGetDeviceProcAddr InGDPA,
-              NVSDK_NGX_Parameter* InParameters) override;
-    bool Evaluate(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter* InParameters) override;
+    // From IFeature_Vk
+    bool InitInternal(VkCommandBuffer InCmdList, NVSDK_NGX_Parameter* InParameters) override;
+    bool EvaluateInternal(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Parameter* InParameters) override;
 
+  public:
     feature_version Version() override { return DLSSFeature::Version(); }
-    std::string Name() const override { return DLSSFeature::Name(); }
+    Upscaler GetUpscalerType() const final { return DLSSFeature::GetUpscalerType(); }
+    API Api() const override { return IFeature_Vk::Api(); }
 
     bool IsWithDx12() override { return false; }
 

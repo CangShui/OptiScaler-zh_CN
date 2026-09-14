@@ -2,6 +2,7 @@
 #include "OS_Dx11.h"
 
 #include "OS_Common.h"
+#include "../Shader_Common.h"
 
 #define A_CPU
 // FSR compute shader is from : https://github.com/fholger/vrperfkit/
@@ -26,130 +27,24 @@ static UpscaleShaderConstants fsr1Constants {};
 
 #pragma warning(disable : 4244)
 
-inline static DXGI_FORMAT TranslateTypelessFormats(DXGI_FORMAT format)
-{
-    switch (format)
-    {
-    case DXGI_FORMAT_R32G32B32A32_TYPELESS:
-        return DXGI_FORMAT_R32G32B32A32_FLOAT;
-    case DXGI_FORMAT_R32G32B32_TYPELESS:
-        return DXGI_FORMAT_R32G32B32_FLOAT;
-    case DXGI_FORMAT_R16G16B16A16_TYPELESS:
-        return DXGI_FORMAT_R16G16B16A16_FLOAT;
-    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
-        return DXGI_FORMAT_R10G10B10A2_UINT;
-    case DXGI_FORMAT_R8G8B8A8_TYPELESS:
-        return DXGI_FORMAT_R8G8B8A8_UNORM;
-    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
-        return DXGI_FORMAT_B8G8R8A8_UNORM;
-    case DXGI_FORMAT_R16G16_TYPELESS:
-        return DXGI_FORMAT_R16G16_FLOAT;
-    case DXGI_FORMAT_R32G32_TYPELESS:
-        return DXGI_FORMAT_R32G32_FLOAT;
-    default:
-        return format;
-    }
-}
-
 bool OS_Dx11::CreateBufferResource(ID3D11Device* InDevice, ID3D11Resource* InResource, uint32_t InWidth,
                                    uint32_t InHeight)
 {
-    if (InDevice == nullptr || InResource == nullptr)
-        return false;
-
-    ID3D11Texture2D* originalTexture = nullptr;
-    auto result = InResource->QueryInterface(IID_PPV_ARGS(&originalTexture));
-    if (result != S_OK)
-        return false;
-
-    D3D11_TEXTURE2D_DESC texDesc;
-    originalTexture->GetDesc(&texDesc);
-    auto targetWidth = texDesc.Width > InWidth ? texDesc.Width : InWidth;
-    auto targetHeight = texDesc.Height > InHeight ? texDesc.Height : InHeight;
-
-    if (_buffer != nullptr)
-    {
-        D3D11_TEXTURE2D_DESC bufDesc;
-        _buffer->GetDesc(&bufDesc);
-
-        if (bufDesc.Width != targetWidth || bufDesc.Height != targetHeight || bufDesc.Format != texDesc.Format)
-        {
-            _buffer->Release();
-            _buffer = nullptr;
-        }
-        else
-            return true;
-    }
-
-    LOG_DEBUG("[{0}] Start!", _name);
-
-    texDesc.Width = targetWidth;
-    texDesc.Height = targetHeight;
-    texDesc.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
-
-    result = InDevice->CreateTexture2D(&texDesc, nullptr, &_buffer);
-    if (result != S_OK)
-    {
-        LOG_ERROR("[{0}] CreateCommittedResource result: {1:x}", _name, result);
-        return false;
-    }
-
-    return true;
+    return CreateBufferResourceCommon(InDevice, InResource, _buffer,
+                                      [InWidth, InHeight](D3D11_TEXTURE2D_DESC& desc)
+                                      {
+                                          desc.Width = desc.Width > InWidth ? desc.Width : InWidth;
+                                          desc.Height = desc.Height > InHeight ? desc.Height : InHeight;
+                                          desc.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
+                                      });
 }
 
 bool OS_Dx11::InitializeViews(ID3D11Texture2D* InResource, ID3D11Texture2D* OutResource)
 {
-    if (!_init || InResource == nullptr || OutResource == nullptr)
-        return false;
+    auto resultInput = InitializeSRV(InResource, _currentInResource, _srvInput);
+    auto resultOutput = InitializeUAV(OutResource, _currentOutResource, _uavOutput);
 
-    D3D11_TEXTURE2D_DESC desc;
-
-    if (InResource != _currentInResource || _srvInput == nullptr)
-    {
-        if (_srvInput != nullptr)
-            _srvInput->Release();
-
-        InResource->GetDesc(&desc);
-
-        // Create SRV for input texture
-        D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-        srvDesc.Format = TranslateTypelessFormats(desc.Format);
-        srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-        srvDesc.Texture2D.MipLevels = desc.MipLevels;
-
-        auto hr = _device->CreateShaderResourceView(InResource, &srvDesc, &_srvInput);
-        if (FAILED(hr))
-        {
-            LOG_ERROR("[{0}] _srvInput CreateShaderResourceView error {1:x}", _name, hr);
-            return false;
-        }
-
-        _currentInResource = InResource;
-    }
-
-    if (OutResource != _currentOutResource || _uavOutput == nullptr)
-    {
-        if (_uavOutput != nullptr)
-            _uavOutput->Release();
-
-        OutResource->GetDesc(&desc);
-
-        // Create UAV for output texture
-        D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
-        uavDesc.Format = TranslateTypelessFormats(desc.Format);
-        uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
-
-        auto hr = _device->CreateUnorderedAccessView(OutResource, &uavDesc, &_uavOutput);
-        if (FAILED(hr))
-        {
-            LOG_ERROR("[{0}] CreateUnorderedAccessView error {1:x}", _name, hr);
-            return false;
-        }
-
-        _currentOutResource = OutResource;
-    }
-
-    return true;
+    return resultInput && resultOutput;
 }
 
 bool OS_Dx11::Dispatch(ID3D11Device* InDevice, ID3D11DeviceContext* InContext, ID3D11Texture2D* InResource,
@@ -159,6 +54,8 @@ bool OS_Dx11::Dispatch(ID3D11Device* InDevice, ID3D11DeviceContext* InContext, I
         return false;
 
     LOG_DEBUG("[{0}] Start!", _name);
+
+    ScopedGpuTime_Dx11 scopedGpuTime(GpuTime.get(), InContext);
 
     _device = InDevice;
 
@@ -233,7 +130,7 @@ bool OS_Dx11::Dispatch(ID3D11Device* InDevice, ID3D11DeviceContext* InContext, I
 }
 
 OS_Dx11::OS_Dx11(std::string InName, ID3D11Device* InDevice, bool InUpsample)
-    : _name(InName), _device(InDevice), _upsample(InUpsample)
+    : Shader_Dx11(InName, InDevice), _upsample(InUpsample)
 {
     if (InDevice == nullptr)
     {
@@ -243,197 +140,94 @@ OS_Dx11::OS_Dx11(std::string InName, ID3D11Device* InDevice, bool InUpsample)
 
     LOG_DEBUG("{0} start!", _name);
 
-    if (Config::Instance()->UsePrecompiledShaders.value_or_default() ||
-        Config::Instance()->OutputScalingDownscaler.value_or_default() == Scaler::FSR1)
+    const void* csoData = nullptr;
+    size_t csoSize = 0;
+    const char* shaderCode = nullptr;
+
+    const auto downscaler = Config::Instance()->OutputScalingDownscaler.value_or_default();
+
+    std::string name = "OS: ";
+
+    if (downscaler == Scaler::FSR1)
     {
-        HRESULT hr;
-
-        // fsr upscaling
-        if (Config::Instance()->OutputScalingDownscaler.value_or_default() == Scaler::FSR1)
-        {
-            hr = _device->CreateComputeShader(reinterpret_cast<const void*>(fsr_easu_cso), sizeof(fsr_easu_cso),
-                                              nullptr, &_computeShader);
-        }
-        else
-        {
-            if (_upsample)
-            {
-                hr = _device->CreateComputeShader(reinterpret_cast<const void*>(bcus_cso), sizeof(bcus_cso), nullptr,
-                                                  &_computeShader);
-            }
-            else
-            {
-                InNumThreadsY = 8;
-                InNumThreadsX = 8;
-
-                switch (Config::Instance()->OutputScalingDownscaler.value_or_default())
-                {
-                case Scaler::Bicubic:
-                    hr = _device->CreateComputeShader(reinterpret_cast<const void*>(bcds_bicubic_cso),
-                                                      sizeof(bcds_bicubic_cso), nullptr, &_computeShader);
-                    break;
-
-                case Scaler::CatmullRom:
-                    hr = _device->CreateComputeShader(reinterpret_cast<const void*>(bcds_catmull_cso),
-                                                      sizeof(bcds_catmull_cso), nullptr, &_computeShader);
-                    break;
-
-                case Scaler::Lanczos2:
-                    hr = _device->CreateComputeShader(reinterpret_cast<const void*>(bcds_lanczos2_cso),
-                                                      sizeof(bcds_lanczos2_cso), nullptr, &_computeShader);
-                    break;
-
-                case Scaler::Lanczos3:
-                    hr = _device->CreateComputeShader(reinterpret_cast<const void*>(bcds_lanczos3_cso),
-                                                      sizeof(bcds_lanczos3_cso), nullptr, &_computeShader);
-                    break;
-
-                case Scaler::Kaiser2:
-                    hr = _device->CreateComputeShader(reinterpret_cast<const void*>(bcds_kaiser2_cso),
-                                                      sizeof(bcds_kaiser2_cso), nullptr, &_computeShader);
-                    break;
-
-                case Scaler::Kaiser3:
-                    hr = _device->CreateComputeShader(reinterpret_cast<const void*>(bcds_kaiser3_cso),
-                                                      sizeof(bcds_kaiser3_cso), nullptr, &_computeShader);
-                    break;
-
-                case Scaler::Magic:
-                    hr = _device->CreateComputeShader(reinterpret_cast<const void*>(bcds_magc_cso),
-                                                      sizeof(bcds_magc_cso), nullptr, &_computeShader);
-                    break;
-
-                default:
-                    hr = _device->CreateComputeShader(reinterpret_cast<const void*>(bcds_bicubic_cso),
-                                                      sizeof(bcds_bicubic_cso), nullptr, &_computeShader);
-                    break;
-                }
-            }
-        }
-
-        if (FAILED(hr))
-        {
-            LOG_ERROR("[{0}] CreateComputeShader error: {1:X}", _name, hr);
-            return;
-        }
+        csoData = fsr_easu_cso;
+        csoSize = sizeof(fsr_easu_cso);
+        name += "FSR1";
+        // FSR1 bypasses runtime compilation
+    }
+    else if (_upsample)
+    {
+        csoData = bcus_cso;
+        csoSize = sizeof(bcus_cso);
+        shaderCode = upsampleCode.c_str();
+        name += "BicubicUp";
     }
     else
     {
-        ID3DBlob* shaderBlob = nullptr;
+        InNumThreadsY = 8;
+        InNumThreadsX = 8;
 
-        // Compile shader blobs
-        if (_upsample)
+        switch (downscaler)
         {
-            shaderBlob = OS_CompileShader(upsampleCode.c_str(), "CSMain", "cs_5_0");
+        case Scaler::CatmullRom:
+            csoData = bcds_catmull_cso;
+            csoSize = sizeof(bcds_catmull_cso);
+            shaderCode = downsampleCodeCatmull.c_str();
+            name += "CatmullRom";
+            break;
+
+        case Scaler::Lanczos2:
+            csoData = bcds_lanczos2_cso;
+            csoSize = sizeof(bcds_lanczos2_cso);
+            shaderCode = downsampleCodeLanczos2.c_str();
+            name += "Lanczos2";
+            break;
+
+        case Scaler::Lanczos3:
+            csoData = bcds_lanczos3_cso;
+            csoSize = sizeof(bcds_lanczos3_cso);
+            shaderCode = downsampleCodeLanczos3.c_str();
+            name += "Lanczos3";
+            break;
+
+        case Scaler::Kaiser2:
+            csoData = bcds_kaiser2_cso;
+            csoSize = sizeof(bcds_kaiser2_cso);
+            shaderCode = downsampleCodeKaiser2.c_str();
+            name += "Kaiser2";
+            break;
+
+        case Scaler::Kaiser3:
+            csoData = bcds_kaiser3_cso;
+            csoSize = sizeof(bcds_kaiser3_cso);
+            shaderCode = downsampleCodeKaiser3.c_str();
+            name += "Kaiser3";
+            break;
+
+        case Scaler::Magic:
+            csoData = bcds_magc_cso;
+            csoSize = sizeof(bcds_magc_cso);
+            shaderCode = downsampleCodeMAGIC.c_str();
+            name += "Magic";
+            break;
+
+        case Scaler::Bicubic:
+        default:
+            csoData = bcds_bicubic_cso;
+            csoSize = sizeof(bcds_bicubic_cso);
+            shaderCode = downsampleCodeBC.c_str();
+            name += "Bicubic";
+            break;
         }
-        else
-        {
-            InNumThreadsY = 8;
-            InNumThreadsX = 8;
+    }
 
-            switch (Config::Instance()->OutputScalingDownscaler.value_or_default())
-            {
-            case Scaler::Bicubic:
-                shaderBlob = OS_CompileShader(downsampleCodeBC.c_str(), "CSMain", "cs_5_0");
-                break;
+    _name = name;
 
-            case Scaler::CatmullRom:
-                shaderBlob = OS_CompileShader(downsampleCodeCatmull.c_str(), "CSMain", "cs_5_0");
-                break;
-
-            case Scaler::Lanczos2:
-                shaderBlob = OS_CompileShader(downsampleCodeLanczos2.c_str(), "CSMain", "cs_5_0");
-                break;
-
-            case Scaler::Lanczos3:
-                shaderBlob = OS_CompileShader(downsampleCodeLanczos3.c_str(), "CSMain", "cs_5_0");
-                break;
-
-            case Scaler::Kaiser2:
-                shaderBlob = OS_CompileShader(downsampleCodeKaiser2.c_str(), "CSMain", "cs_5_0");
-                break;
-
-            case Scaler::Kaiser3:
-                shaderBlob = OS_CompileShader(downsampleCodeKaiser3.c_str(), "CSMain", "cs_5_0");
-                break;
-
-            case Scaler::Magic:
-                shaderBlob = OS_CompileShader(downsampleCodeMAGIC.c_str(), "CSMain", "cs_5_0");
-                break;
-
-            default:
-                shaderBlob = OS_CompileShader(downsampleCodeBC.c_str(), "CSMain", "cs_5_0");
-                break;
-            }
-        }
-
-        HRESULT hr = E_FAIL;
-
-        if (shaderBlob != nullptr)
-        {
-            // create pso objects
-            hr = _device->CreateComputeShader(shaderBlob->GetBufferPointer(), shaderBlob->GetBufferSize(), nullptr,
-                                              &_computeShader);
-        }
-        else
-        {
-            LOG_ERROR("[{0}] CompileShader error!", _name);
-
-            switch (Config::Instance()->OutputScalingDownscaler.value_or_default())
-            {
-            case Scaler::Bicubic:
-                hr = _device->CreateComputeShader(reinterpret_cast<const void*>(bcds_bicubic_cso),
-                                                  sizeof(bcds_bicubic_cso), nullptr, &_computeShader);
-                break;
-
-            case Scaler::CatmullRom:
-                hr = _device->CreateComputeShader(reinterpret_cast<const void*>(bcds_catmull_cso),
-                                                  sizeof(bcds_catmull_cso), nullptr, &_computeShader);
-                break;
-
-            case Scaler::Lanczos2:
-                hr = _device->CreateComputeShader(reinterpret_cast<const void*>(bcds_lanczos2_cso),
-                                                  sizeof(bcds_lanczos2_cso), nullptr, &_computeShader);
-                break;
-
-            case Scaler::Lanczos3:
-                hr = _device->CreateComputeShader(reinterpret_cast<const void*>(bcds_lanczos3_cso),
-                                                  sizeof(bcds_lanczos3_cso), nullptr, &_computeShader);
-                break;
-
-            case Scaler::Kaiser2:
-                hr = _device->CreateComputeShader(reinterpret_cast<const void*>(bcds_kaiser2_cso),
-                                                  sizeof(bcds_kaiser2_cso), nullptr, &_computeShader);
-                break;
-
-            case Scaler::Kaiser3:
-                hr = _device->CreateComputeShader(reinterpret_cast<const void*>(bcds_kaiser3_cso),
-                                                  sizeof(bcds_kaiser3_cso), nullptr, &_computeShader);
-                break;
-
-            case Scaler::Magic:
-                hr = _device->CreateComputeShader(reinterpret_cast<const void*>(bcds_magc_cso), sizeof(bcds_magc_cso),
-                                                  nullptr, &_computeShader);
-                break;
-
-            default:
-                hr = _device->CreateComputeShader(reinterpret_cast<const void*>(bcds_bicubic_cso),
-                                                  sizeof(bcds_bicubic_cso), nullptr, &_computeShader);
-                break;
-            }
-        }
-
-        if (shaderBlob != nullptr)
-        {
-            shaderBlob->Release();
-            shaderBlob = nullptr;
-        }
-
-        if (FAILED(hr))
-        {
-            LOG_ERROR("[{0}] CreateComputeShader error: {1:X}", _name, hr);
-            return;
-        }
+    HRESULT result = CreateComputeShader(InDevice, _computeShader, csoData, csoSize, shaderCode);
+    if (FAILED(result))
+    {
+        LOG_ERROR("[{0}] CreateComputeShader error: {1:X}", _name, result);
+        return;
     }
 
     // CBV
@@ -442,39 +236,19 @@ OS_Dx11::OS_Dx11(std::string InName, ID3D11Device* InDevice, bool InUpsample)
     cbDesc.ByteWidth = sizeof(Constants);
     cbDesc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     cbDesc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    auto result = InDevice->CreateBuffer(&cbDesc, nullptr, &_constantBuffer);
+
+    result = InDevice->CreateBuffer(&cbDesc, nullptr, &_constantBuffer);
     if (result != S_OK)
     {
         LOG_ERROR("CreateBuffer error: {0:X}", (UINT) result);
         return;
     }
 
-    // FSR upscaling
-    if (Config::Instance()->OutputScalingDownscaler.value_or_default() == Scaler::FSR1)
+    if (downscaler == Scaler::FSR1)
     {
         InNumThreadsX = 16;
         InNumThreadsY = 16;
     }
+
     _init = true;
-}
-
-OS_Dx11::~OS_Dx11()
-{
-    if (!_init || State::Instance().isShuttingDown)
-        return;
-
-    if (_computeShader != nullptr)
-        _computeShader->Release();
-
-    if (_constantBuffer != nullptr)
-        _constantBuffer->Release();
-
-    if (_srvInput != nullptr)
-        _srvInput->Release();
-
-    if (_uavOutput != nullptr)
-        _uavOutput->Release();
-
-    if (_buffer != nullptr)
-        _buffer->Release();
 }

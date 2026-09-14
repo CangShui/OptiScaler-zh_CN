@@ -4,6 +4,7 @@
 #include <proxies/FfxApi_Proxy.h>
 #include <shaders/format_transfer/FT_Dx12.h>
 #include <shaders/hud_copy/HudCopy_Dx12.h>
+#include <shaders/hudless_compare_compute/HCC_Dx12.h>
 
 #include <ffx_framegeneration.h>
 
@@ -22,6 +23,7 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
     uint32_t _maxRenderHeight = 0;
 
     std::unique_ptr<HudCopy_Dx12> _hudCopy[BUFFER_COUNT];
+    std::unique_ptr<HCC_Dx12> _hudlessCompareCompute[BUFFER_COUNT];
 
     std::unique_ptr<FT_Dx12> _hudlessTransfer[BUFFER_COUNT];
     ID3D12Resource* _hudlessCopyResource[BUFFER_COUNT] {};
@@ -66,25 +68,6 @@ class FSRFG_Dx12 : public virtual IFGFeature_Dx12
     bool HudlessFormatTransfer(int index, ID3D12Device* device, DXGI_FORMAT targetFormat, Dx12Resource* resource);
     bool UIFormatTransfer(int index, ID3D12Device* device, ID3D12GraphicsCommandList* cmdList, DXGI_FORMAT targetFormat,
                           Dx12Resource* resource);
-
-    void ParseVersion(const char* version_str, feature_version* _version)
-    {
-        const char* p = version_str;
-
-        // Skip non-digits at front
-        while (*p)
-        {
-            if (isdigit((unsigned char) p[0]))
-            {
-                if (sscanf(p, "%u.%u.%u", &_version->major, &_version->minor, &_version->patch) == 3)
-                    return;
-            }
-
-            ++p;
-        }
-
-        LOG_WARN("can't parse {0}", version_str);
-    }
 
   protected:
     void ReleaseObjects() override final;

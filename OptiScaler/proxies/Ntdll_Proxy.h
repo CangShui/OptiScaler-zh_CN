@@ -17,22 +17,51 @@ class NtdllProxy
 
     typedef NTSTATUS(NTAPI* PFN_LdrUnloadDll)(PVOID ModuleHandle);
 
+    typedef NTSTATUS(NTAPI* PFN_RtlGetVersion)(PRTL_OSVERSIONINFOW lpVersionInformation);
+
+    // It's a partial implementation
     static HMODULE LoadLibraryExW_Ldr(LPCWSTR lpLibFileName, HANDLE hFile, DWORD dwFlags)
     {
-        UNICODE_STRING uName;
-        o_RtlInitUnicodeString(&uName, lpLibFileName);
-
-        // LdrLoadDll wants a ULONG*, so stash flags here:
-        ULONG flags = dwFlags;
+        // LdrLoadDll wants a ULONG*, remove unsupported flags
+        ULONG ldrFlags = dwFlags & ~(LOAD_WITH_ALTERED_SEARCH_PATH | LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
+                                     LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_USER_DIRS |
+                                     LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR);
 
         // This will receive the module handle:
         HANDLE hModule = nullptr;
 
-        NTSTATUS status = o_LdrLoadDll(nullptr, // PathToFile – we rely on the default search order
-                                       &flags,  // optional flags
-                                       &uName,  // the name of the DLL
-                                       &hModule // out: module handle
-        );
+        NTSTATUS status;
+        if (dwFlags & LOAD_LIBRARY_SEARCH_SYSTEM32)
+        {
+            static std::filesystem::path sysDir = []
+            {
+                wchar_t buffer[MAX_PATH];
+                GetSystemDirectoryW(buffer, MAX_PATH);
+                return std::filesystem::path(buffer);
+            }();
+
+            std::filesystem::path sysPath = sysDir / lpLibFileName;
+
+            UNICODE_STRING uName;
+            o_RtlInitUnicodeString(&uName, sysPath.c_str());
+
+            status = o_LdrLoadDll(nullptr,                        // null is default search order
+                                  ldrFlags ? &ldrFlags : nullptr, // optional flags
+                                  &uName,                         // the name of the DLL
+                                  &hModule                        // out: module handle
+            );
+        }
+        else
+        {
+            UNICODE_STRING uName;
+            o_RtlInitUnicodeString(&uName, lpLibFileName);
+
+            status = o_LdrLoadDll(nullptr,                        // null is default search order
+                                  ldrFlags ? &ldrFlags : nullptr, // optional flags
+                                  &uName,                         // the name of the DLL
+                                  &hModule                        // out: module handle
+            );
+        }
 
         if (NT_SUCCESS(status))
         {
@@ -60,12 +89,26 @@ class NtdllProxy
 
         o_RtlInitUnicodeString = (PFN_RtlInitUnicodeString) GetProcAddress(_dll, "RtlInitUnicodeString");
         o_RtlNtStatusToDosError = (PFN_RtlNtStatusToDosError) GetProcAddress(_dll, "RtlNtStatusToDosError");
+        o_RtlGetVersion = (PFN_RtlGetVersion) GetProcAddress(_dll, "RtlGetVersion");
         o_LdrLoadDll = (PFN_LdrLoadDll) GetProcAddress(_dll, "LdrLoadDll");
         o_LdrUnloadDll = (PFN_LdrUnloadDll) GetProcAddress(_dll, "LdrUnloadDll");
         o_NtLoadDll = (PFN_NtLoadDll) GetProcAddress(_dll, "NtLoadDll");
     }
 
     static HMODULE Module() { return _dll; }
+
+    static PFN_RtlGetVersion Hook_RtlGetVersion(PVOID method)
+    {
+        auto addr = o_RtlGetVersion;
+
+        DetourTransactionBegin();
+        DetourUpdateThread(GetCurrentThread());
+        DetourAttach(&(PVOID&) addr, method);
+        DetourTransactionCommit();
+
+        o_RtlGetVersion = addr;
+        return addr;
+    }
 
     static PFN_LdrLoadDll Hook_LdrLoadDll(PVOID method)
     {
@@ -132,4 +175,5 @@ class NtdllProxy
     inline static PFN_NtLoadDll o_NtLoadDll = nullptr;
     inline static PFN_RtlInitUnicodeString o_RtlInitUnicodeString = nullptr;
     inline static PFN_RtlNtStatusToDosError o_RtlNtStatusToDosError = nullptr;
+    inline static PFN_RtlGetVersion o_RtlGetVersion = nullptr;
 };

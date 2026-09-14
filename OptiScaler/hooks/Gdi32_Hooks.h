@@ -4,11 +4,14 @@
 #include "detours/detours.h"
 
 #include "Hook_Utils.h"
+#include <misc/IdentifyGpu.h>
 
 typedef decltype(&D3DKMTQueryAdapterInfo) PFN_D3DKMTQueryAdapterInfo;
+typedef decltype(&D3DKMTEnumAdapters) PFN_D3DKMTEnumAdapters;
 typedef decltype(&D3DKMTEnumAdapters2) PFN_D3DKMTEnumAdapters2;
+typedef decltype(&D3DKMTCloseAdapter) PFN_D3DKMTCloseAdapter;
 
-static PFN_D3DKMTQueryAdapterInfo o_D3DKMTQueryAdapterInfo = nullptr;
+inline static PFN_D3DKMTQueryAdapterInfo o_D3DKMTQueryAdapterInfo = nullptr;
 
 VALIDATE_HOOK(hkD3DKMTQueryAdapterInfo, PFN_D3DKMTQueryAdapterInfo)
 static NTSTATUS hkD3DKMTQueryAdapterInfo(const D3DKMT_QUERYADAPTERINFO* data)
@@ -53,20 +56,22 @@ static NTSTATUS hkD3DKMTQueryAdapterInfo(const D3DKMT_QUERYADAPTERINFO* data)
     {
         LOG_DEBUG("Likely FSR 4 GPU Check");
 
+        auto primaryGpu = IdentifyGpu::getPrimaryGpu();
+
         auto amd_gpu_info = static_cast<uint32_t*>(data->pPrivateDriverData);
 
-        if (Config::Instance()->Fsr4Update.value_or_default() || State::Instance().isRunningOnLinux)
+        if (primaryGpu.fsr4ForcedSupport || State::Instance().isRunningOnLinux)
         {
             // Values as per https://gitlab.freedesktop.org/mesa/mesa/-/blob/main/src/amd/addrlib/src/amdgpu_asic_addr.h
             // Seem to be asic family and asic revision
-            if (State::Instance().isRunningOnRDNA3.has_value() && State::Instance().isRunningOnRDNA3.value())
+            if (primaryGpu.fsr4Support == FSR4Support::INT8)
             {
                 amd_gpu_info[12] = 145; // gfx11
                 amd_gpu_info[13] = 1;
 
                 return 1;
             }
-            if (State::Instance().isRunningOnRDNA4.has_value() && State::Instance().isRunningOnRDNA4.value())
+            else if (primaryGpu.fsr4Support == FSR4Support::FP8)
             {
                 // Based on 9070xt
                 amd_gpu_info[12] = 152; // gfx12

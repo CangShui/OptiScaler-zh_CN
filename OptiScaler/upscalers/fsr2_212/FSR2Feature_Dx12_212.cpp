@@ -1,72 +1,34 @@
 #include <pch.h>
 #include <Config.h>
-
 #include "FSR2Feature_Dx12_212.h"
+#include "MathUtils.h"
 
-bool FSR2FeatureDx12_212::Init(ID3D12Device* InDevice, ID3D12GraphicsCommandList* InCommandList,
-                               NVSDK_NGX_Parameter* InParameters)
+using namespace OptiMath;
+
+bool FSR2FeatureDx12_212::InitInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters)
 {
     LOG_FUNC();
 
     if (IsInited())
         return true;
 
-    Device = InDevice;
-
-    if (InitFSR2(InParameters))
-    {
-        if (!Config::Instance()->OverlayMenu.value_or_default() && (Imgui == nullptr || Imgui.get() == nullptr))
-            Imgui = std::make_unique<Menu_Dx12>(Util::GetProcessWindow(), InDevice);
-
-        OutputScaler = std::make_unique<OS_Dx12>("Output Scaling", InDevice, (TargetWidth() < DisplayWidth()));
-        RCAS = std::make_unique<RCAS_Dx12>("RCAS", InDevice);
-        Bias = std::make_unique<Bias_Dx12>("Bias", InDevice);
-
-        return true;
-    }
-
-    return false;
+    return InitFSR2(InParameters);
 }
 
-bool FSR2FeatureDx12_212::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters)
+bool FSR2FeatureDx12_212::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters)
 {
     LOG_FUNC();
 
-    if (!IsInited())
-        return false;
-
-    if (!RCAS->IsInit())
-        Config::Instance()->RcasEnabled.set_volatile_value(false);
-
-    if (!OutputScaler->IsInit())
-        Config::Instance()->OutputScalingEnabled.set_volatile_value(false);
-
-    if (Config::Instance()->DADepthIsLinear.value_for_config_ignore_default() == std::nullopt)
-        Config::Instance()->DADepthIsLinear.set_volatile_value(false);
+    auto& state = State::Instance();
+    auto& cfg = *Config::Instance();
 
     Fsr212::FfxFsr2DispatchDescription params {};
 
     InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &params.jitterOffset.x);
     InParameters->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &params.jitterOffset.y);
 
-    if (Config::Instance()->OverrideSharpness.value_or_default())
-        _sharpness = Config::Instance()->Sharpness.value_or_default();
-    else
-        _sharpness = GetSharpness(InParameters);
-
-    if (Config::Instance()->RcasEnabled.value_or_default())
-    {
-        params.enableSharpening = false;
-        params.sharpness = 0.0f;
-    }
-    else
-    {
-        if (_sharpness > 1.0f)
-            _sharpness = 1.0f;
-
-        params.enableSharpening = _sharpness > 0.0f;
-        params.sharpness = _sharpness;
-    }
+    params.enableSharpening = _sharpness > 0.0f;
+    params.sharpness = _sharpness;
 
     LOG_DEBUG("Jitter Offset: {0}x{1}", params.jitterOffset.x, params.jitterOffset.y);
 
@@ -98,7 +60,7 @@ bool FSR2FeatureDx12_212::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVS
                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
         else if (State::Instance().NVNGX_Engine == NVSDK_NGX_ENGINE_TYPE_UNREAL ||
-                 State::Instance().GameEngine == GameEngineType::Unreal ||
+                 State::Instance().gameEngine == GameEngineType::Unreal ||
                  State::Instance().gameQuirks & GameQuirk::ForceUnrealEngine)
         {
             Config::Instance()->ColorResourceBarrier.set_volatile_value(D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -130,7 +92,7 @@ bool FSR2FeatureDx12_212::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVS
                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
         else if (State::Instance().NVNGX_Engine == NVSDK_NGX_ENGINE_TYPE_UNREAL ||
-                 State::Instance().GameEngine == GameEngineType::Unreal ||
+                 State::Instance().gameEngine == GameEngineType::Unreal ||
                  State::Instance().gameQuirks & GameQuirk::ForceUnrealEngine)
         {
             Config::Instance()->MVResourceBarrier.set_volatile_value(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -160,35 +122,8 @@ bool FSR2FeatureDx12_212::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVS
                             (D3D12_RESOURCE_STATES) Config::Instance()->OutputResourceBarrier.value(),
                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-        if (useSS)
-        {
-            if (OutputScaler->CreateBufferResource(Device, paramOutput, TargetWidth(), TargetHeight(),
-                                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
-            {
-                OutputScaler->SetBufferState(InCommandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                params.output =
-                    Fsr212::ffxGetResourceDX12_212(&_context, OutputScaler->Buffer(), (wchar_t*) L"FSR2_Output",
-                                                   Fsr212::FFX_RESOURCE_STATE_UNORDERED_ACCESS);
-            }
-            else
-                params.output = Fsr212::ffxGetResourceDX12_212(&_context, paramOutput, (wchar_t*) L"FSR2_Output",
-                                                               Fsr212::FFX_RESOURCE_STATE_UNORDERED_ACCESS);
-        }
-        else
-            params.output = Fsr212::ffxGetResourceDX12_212(&_context, paramOutput, (wchar_t*) L"FSR2_Output",
-                                                           Fsr212::FFX_RESOURCE_STATE_UNORDERED_ACCESS);
-
-        if (Config::Instance()->RcasEnabled.value_or_default() &&
-            (_sharpness > 0.0f || (Config::Instance()->MotionSharpnessEnabled.value_or_default() &&
-                                   Config::Instance()->MotionSharpness.value_or_default() > 0.0f)) &&
-            RCAS->IsInit() &&
-            RCAS->CreateBufferResource(Device, (ID3D12Resource*) params.output.resource,
-                                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
-        {
-            RCAS->SetBufferState(InCommandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            params.output = Fsr212::ffxGetResourceDX12_212(&_context, RCAS->Buffer(), (wchar_t*) L"FSR2_Output",
-                                                           Fsr212::FFX_RESOURCE_STATE_UNORDERED_ACCESS);
-        }
+        params.output = Fsr212::ffxGetResourceDX12_212(&_context, paramOutput, (wchar_t*) L"FSR2_Output",
+                                                       Fsr212::FFX_RESOURCE_STATE_UNORDERED_ACCESS);
     }
     else
     {
@@ -243,7 +178,7 @@ bool FSR2FeatureDx12_212::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVS
         else
         {
             LOG_DEBUG("AutoExposure disabled but ExposureTexture is not exist, it may cause problems!!");
-            State::Instance().AutoExposure = true;
+            State::Instance().autoExposure = true;
             State::Instance().changeBackend[Handle()->Id] = true;
             return true;
         }
@@ -301,7 +236,7 @@ bool FSR2FeatureDx12_212::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVS
                 {
                     Bias->SetBufferState(InCommandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-                    if (Bias->Dispatch(Device, InCommandList, paramReactiveMask2,
+                    if (Bias->Dispatch(InCommandList, paramReactiveMask2,
                                        Config::Instance()->DlssReactiveMaskBias.value_or_default(), Bias->Buffer()))
                     {
                         Bias->SetBufferState(InCommandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -339,34 +274,36 @@ bool FSR2FeatureDx12_212::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVS
 
     LOG_DEBUG("Sharpness: {0}", params.sharpness);
 
-    if (Config::Instance()->FsrCameraNear.has_value() || !Config::Instance()->FsrUseFsrInputValues.value_or_default() ||
-        InParameters->Get("FSR.cameraNear", &params.cameraNear) != NVSDK_NGX_Result_Success)
+    if (cfg.FsrCameraNear.has_value() || !cfg.FsrUseFsrInputValues.value_or_default() ||
+        InParameters->Get(OptiKeys::FSR_NearPlane, &params.cameraNear) != NVSDK_NGX_Result_Success)
     {
         if (DepthInverted())
-            params.cameraFar = Config::Instance()->FsrCameraNear.value_or_default();
+            params.cameraFar = cfg.FsrCameraNear.value_or_default();
         else
-            params.cameraNear = Config::Instance()->FsrCameraNear.value_or_default();
+            params.cameraNear = cfg.FsrCameraNear.value_or_default();
     }
 
-    if (!Config::Instance()->FsrUseFsrInputValues.value_or_default() ||
-        InParameters->Get("FSR.cameraFar", &params.cameraFar) != NVSDK_NGX_Result_Success)
+    if (!cfg.FsrUseFsrInputValues.value_or_default() ||
+        InParameters->Get(OptiKeys::FSR_FarPlane, &params.cameraFar) != NVSDK_NGX_Result_Success)
     {
         if (DepthInverted())
-            params.cameraNear = Config::Instance()->FsrCameraFar.value_or_default();
+            params.cameraNear = cfg.FsrCameraFar.value_or_default();
         else
-            params.cameraFar = Config::Instance()->FsrCameraFar.value_or_default();
+            params.cameraFar = cfg.FsrCameraFar.value_or_default();
     }
 
-    if (InParameters->Get("FSR.cameraFovAngleVertical", &params.cameraFovAngleVertical) != NVSDK_NGX_Result_Success)
+    if (InParameters->Get(OptiKeys::FSR_CameraFovVertical, &params.cameraFovAngleVertical) != NVSDK_NGX_Result_Success)
     {
-        if (Config::Instance()->FsrVerticalFov.has_value())
-            params.cameraFovAngleVertical = Config::Instance()->FsrVerticalFov.value() * 0.0174532925199433f;
-        else if (Config::Instance()->FsrHorizontalFov.value_or_default() > 0.0f)
+        if (cfg.FsrVerticalFov.has_value())
+            params.cameraFovAngleVertical = GetRadiansFromDeg(cfg.FsrVerticalFov.value());
+        else if (cfg.FsrHorizontalFov.value_or_default() > 0.0f)
+        {
+            const float hFovRad = GetRadiansFromDeg(cfg.FsrHorizontalFov.value());
             params.cameraFovAngleVertical =
-                2.0f * atan((tan(Config::Instance()->FsrHorizontalFov.value() * 0.0174532925199433f) * 0.5f) /
-                            (float) TargetHeight() * (float) TargetWidth());
+                GetVerticalFovFromHorizontal(hFovRad, (float) TargetWidth(), (float) TargetHeight());
+        }
         else
-            params.cameraFovAngleVertical = 1.0471975511966f;
+            params.cameraFovAngleVertical = GetRadiansFromDeg(60);
     }
 
     if (!Config::Instance()->FsrUseFsrInputValues.value_or_default() ||
@@ -390,89 +327,6 @@ bool FSR2FeatureDx12_212::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVS
     {
         LOG_ERROR("ffxFsr2ContextDispatch error: {0}", ResultToString212(result));
         return false;
-    }
-
-    // apply rcas
-    if (Config::Instance()->RcasEnabled.value_or_default() &&
-        (_sharpness > 0.0f || (Config::Instance()->MotionSharpnessEnabled.value_or_default() &&
-                               Config::Instance()->MotionSharpness.value_or_default() > 0.0f)) &&
-        RCAS->CanRender())
-    {
-        if (params.output.resource != RCAS->Buffer())
-            ResourceBarrier(InCommandList, (ID3D12Resource*) params.output.resource,
-                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-        RCAS->SetBufferState(InCommandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-        RcasConstants rcasConstants {};
-
-        rcasConstants.Sharpness = _sharpness;
-        InParameters->Get(NVSDK_NGX_Parameter_MV_Scale_X, &rcasConstants.MvScaleX);
-        InParameters->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &rcasConstants.MvScaleY);
-
-        if (DepthInverted())
-        {
-            rcasConstants.CameraNear = params.cameraFar;
-            rcasConstants.CameraFar = params.cameraNear;
-        }
-        else
-        {
-            rcasConstants.CameraNear = params.cameraNear;
-            rcasConstants.CameraFar = params.cameraFar;
-        }
-
-        if (useSS)
-        {
-            if (!RCAS->Dispatch(Device, InCommandList, (ID3D12Resource*) params.output.resource,
-                                (ID3D12Resource*) params.motionVectors.resource, rcasConstants, OutputScaler->Buffer(),
-                                (ID3D12Resource*) params.depth.resource))
-            {
-                Config::Instance()->RcasEnabled.set_volatile_value(false);
-                return true;
-            }
-        }
-        else
-        {
-            if (!RCAS->Dispatch(Device, InCommandList, (ID3D12Resource*) params.output.resource,
-                                (ID3D12Resource*) params.motionVectors.resource, rcasConstants, paramOutput,
-                                (ID3D12Resource*) params.depth.resource))
-            {
-                Config::Instance()->RcasEnabled.set_volatile_value(false);
-                return true;
-            }
-        }
-    }
-
-    if (useSS)
-    {
-        LOG_DEBUG("scaling output...");
-        OutputScaler->SetBufferState(InCommandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-        if (!OutputScaler->Dispatch(Device, InCommandList, OutputScaler->Buffer(), paramOutput))
-        {
-            Config::Instance()->OutputScalingEnabled.set_volatile_value(false);
-            State::Instance().changeBackend[Handle()->Id] = true;
-            return true;
-        }
-    }
-
-    // imgui
-    if (!Config::Instance()->OverlayMenu.value_or_default() && _frameCount > 30)
-    {
-        if (Imgui != nullptr && Imgui.get() != nullptr)
-        {
-            if (Imgui->IsHandleDifferent())
-            {
-                Imgui.reset();
-            }
-            else
-                Imgui->Render(InCommandList, paramOutput);
-        }
-        else
-        {
-            if (Imgui == nullptr || Imgui.get() == nullptr)
-                Imgui = std::make_unique<Menu_Dx12>(GetForegroundWindow(), Device);
-        }
     }
 
     // restore resource states
@@ -521,7 +375,7 @@ bool FSR2FeatureDx12_212::InitFSR2(const NVSDK_NGX_Parameter* InParameters)
     }
 
     {
-        ScopedSkipSpoofing skipSpoofing {};
+        ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
 
         const size_t scratchBufferSize = Fsr212::ffxFsr2GetScratchMemorySizeDX12_212();
         void* scratchBuffer = calloc(scratchBufferSize, 1);

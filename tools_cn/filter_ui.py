@@ -4,7 +4,7 @@ import json
 import re
 from pathlib import Path
 
-BASE = Path(r"C:\Users\Administrator\Desktop\test\OptiScaler\tools_cn")
+BASE = Path(__file__).resolve().parent
 items = json.loads((BASE / "strings_extracted.json").read_text(encoding="utf-8"))
 
 UI_CTX = re.compile(

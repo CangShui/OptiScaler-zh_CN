@@ -8,8 +8,10 @@ class XeSSFeatureDx12 : public XeSSFeature, public IFeature_Dx12
   private:
   protected:
   public:
-    std::string Name() const override { return "XeSS"; }
     feature_version Version() override { return XeSSFeature::Version(); }
+    Upscaler GetUpscalerType() const final { return Upscaler::XeSS; }
+    API Api() const override { return IFeature_Dx12::Api(); }
+    bool CallsUpscalerEndByItself() override { return IFeature_Dx12::CallsUpscalerEndByItself(); }
 
     XeSSFeatureDx12(unsigned int InHandleId, NVSDK_NGX_Parameter* InParameters)
         : IFeature(InHandleId, InParameters), IFeature_Dx12(InHandleId, InParameters),
@@ -21,9 +23,8 @@ class XeSSFeatureDx12 : public XeSSFeature, public IFeature_Dx12
         _moduleLoaded = XeSSProxy::Module() != nullptr && XeSSProxy::D3D12CreateContext() != nullptr;
     }
 
-    bool Init(ID3D12Device* InDevice, ID3D12GraphicsCommandList* InCommandList,
-              NVSDK_NGX_Parameter* InParameters) override;
-    bool Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters) override;
+    bool InitInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters) override;
+    bool EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters) override;
 
     bool IsWithDx12() final { return false; }
 

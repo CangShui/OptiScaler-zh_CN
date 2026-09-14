@@ -21,19 +21,18 @@ void HudCopy_Dx12::ResourceBarrier(ID3D12GraphicsCommandList* cmdList, ID3D12Res
     cmdList->ResourceBarrier(1, &barrier);
 }
 
-bool HudCopy_Dx12::Dispatch(ID3D12Device* InDevice, ID3D12GraphicsCommandList* cmdList, ID3D12Resource* hudless,
-                            ID3D12Resource* present, D3D12_RESOURCE_STATES hudlessState,
-                            D3D12_RESOURCE_STATES presentState, float hudDetectionThreshold)
+bool HudCopy_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* hudless, ID3D12Resource* present,
+                            D3D12_RESOURCE_STATES hudlessState, D3D12_RESOURCE_STATES presentState,
+                            float hudDetectionThreshold)
 {
-    if (!_init || InDevice == nullptr || hudless == nullptr || present == nullptr || cmdList == nullptr)
+    if (!_init || _device == nullptr || hudless == nullptr || present == nullptr || cmdList == nullptr)
         return false;
+
+    ScopedGpuTime_Dx12 scopedGpuTime(GpuTime.get(), cmdList);
 
     _counter++;
     _counter = _counter % HudCopy_NUM_OF_HEAPS;
     FrameDescriptorHeap& currentHeap = _frameHeaps[_counter];
-
-    auto hudlessDesc = hudless->GetDesc();
-    auto presentDesc = present->GetDesc();
 
     if (_buffer == nullptr)
     {
@@ -42,7 +41,7 @@ bool HudCopy_Dx12::Dispatch(ID3D12Device* InDevice, ID3D12GraphicsCommandList* c
         auto resourceFlags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS |
                              D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
 
-        auto result = Shader_Dx12::CreateBufferResource(InDevice, present, D3D12_RESOURCE_STATE_COPY_DEST, &_buffer,
+        auto result = Shader_Dx12::CreateBufferResource(_device, present, D3D12_RESOURCE_STATE_COPY_DEST, &_buffer,
                                                         resourceFlags);
 
         if (result)
@@ -61,61 +60,19 @@ bool HudCopy_Dx12::Dispatch(ID3D12Device* InDevice, ID3D12GraphicsCommandList* c
 
     ResourceBarrier(cmdList, hudless, hudlessState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
-    auto presentCopyDesc = _buffer->GetDesc();
-
-    // Create SRV for Input Texture
-    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc1 = {};
-    srvDesc1.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srvDesc1.Format = Shader_Dx12::TranslateTypelessFormats(hudlessDesc.Format);
-    srvDesc1.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srvDesc1.Texture2D.MipLevels = 1;
-    InDevice->CreateShaderResourceView(hudless, &srvDesc1, currentHeap.GetSrvCPU(0));
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc2 = {};
-    srvDesc2.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srvDesc2.Format = Shader_Dx12::TranslateTypelessFormats(presentDesc.Format);
-    srvDesc2.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    srvDesc2.Texture2D.MipLevels = 1;
-    InDevice->CreateShaderResourceView(present, &srvDesc2, currentHeap.GetSrvCPU(1));
-
-    // Create UAV for Output Texture
-    D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
-    uavDesc.Format = Shader_Dx12::TranslateTypelessFormats(presentCopyDesc.Format);
-    uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    InDevice->CreateUnorderedAccessView(_buffer, nullptr, &uavDesc, currentHeap.GetUavCPU(0));
+    // Create views
+    CreateShaderResourceView(_device, hudless, currentHeap.GetSrvCPU(0));
+    CreateShaderResourceView(_device, present, currentHeap.GetSrvCPU(1));
+    CreateUnorderedAccessView(_device, _buffer, currentHeap.GetUavCPU(0), 0);
 
     InternalCompareParams constants {};
     constants.DiffThreshold = hudDetectionThreshold;
 
-    // Copy the updated constant buffer data to the constant buffer resource
-    BYTE* pCBDataBegin;
-    CD3DX12_RANGE readRange(0, 0); // We do not intend to read from this resource on the CPU
-    auto result = _constantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&pCBDataBegin));
-
-    if (result != S_OK)
+    if (!CreateConstantsBuffer(_device, _constantBuffer, constants, currentHeap.GetCbvCPU(0)))
     {
-        LOG_ERROR("[{0}] _constantBuffer->Map error {1:x}", _name, (unsigned int) result);
-
-        if (result == DXGI_ERROR_DEVICE_REMOVED && _device != nullptr)
-            Util::GetDeviceRemovedReason(_device);
-
+        LOG_ERROR("[{0}] Failed to create a constants buffer", _name);
         return false;
     }
-
-    if (pCBDataBegin == nullptr)
-    {
-        _constantBuffer->Unmap(0, nullptr);
-        LOG_ERROR("[{0}] pCBDataBegin is null!", _name);
-        return false;
-    }
-
-    memcpy(pCBDataBegin, &constants, sizeof(constants));
-    _constantBuffer->Unmap(0, nullptr);
-
-    D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-    cbvDesc.BufferLocation = _constantBuffer->GetGPUVirtualAddress();
-    cbvDesc.SizeInBytes = sizeof(constants);
-    InDevice->CreateConstantBufferView(&cbvDesc, currentHeap.GetCbvCPU(0));
 
     ID3D12DescriptorHeap* heaps[] = { currentHeap.GetHeapCSU() };
     cmdList->SetDescriptorHeaps(_countof(heaps), heaps);
@@ -125,6 +82,7 @@ bool HudCopy_Dx12::Dispatch(ID3D12Device* InDevice, ID3D12GraphicsCommandList* c
 
     cmdList->SetComputeRootDescriptorTable(0, currentHeap.GetTableGPUStart());
 
+    auto presentDesc = present->GetDesc();
     UINT dispatchWidth = static_cast<UINT>((presentDesc.Width + InNumThreadsX - 1) / InNumThreadsX);
     UINT dispatchHeight = (presentDesc.Height + InNumThreadsY - 1) / InNumThreadsY;
 
@@ -153,22 +111,11 @@ HudCopy_Dx12::HudCopy_Dx12(std::string InName, ID3D12Device* InDevice) : Shader_
 
     LOG_DEBUG("{0} start!", _name);
 
-    CD3DX12_DESCRIPTOR_RANGE1 descriptorRanges[] = {
-        // 1 SRV starting at register t0, space 0
-        CD3DX12_DESCRIPTOR_RANGE1(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 0),
-
-        // 1 UAV starting at register u0, space 0
-        CD3DX12_DESCRIPTOR_RANGE1(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0),
-
-        // 1 CBV starting at register b0, space 0
-        CD3DX12_DESCRIPTOR_RANGE1(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 0)
-    };
-
-    CD3DX12_ROOT_PARAMETER1 rootParameter {};
-    rootParameter.InitAsDescriptorTable(std::size(descriptorRanges), descriptorRanges);
-
-    CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSigDesc;
-    rootSigDesc.Init_1_1(1, &rootParameter);
+    if (!SetupRootSignature(InDevice, 2, 1, 1))
+    {
+        LOG_ERROR("Failed to setup root signature");
+        return;
+    }
 
     D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(sizeof(InternalCompareParams));
     auto heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
@@ -183,102 +130,13 @@ HudCopy_Dx12::HudCopy_Dx12(std::string InName, ID3D12Device* InDevice) : Shader_
         return;
     }
 
-    ID3DBlob* errorBlob;
-    ID3DBlob* signatureBlob;
-
-    do
+    if (!CreateComputePipeline(InDevice, &_pipelineState, HudCopy_cso, sizeof(HudCopy_cso), shaderCode.c_str()))
     {
-        auto hr = D3D12SerializeVersionedRootSignature(&rootSigDesc, &signatureBlob, &errorBlob);
-
-        if (FAILED(hr))
-        {
-            LOG_ERROR("[{0}] D3D12SerializeVersionedRootSignature error {1:x}", _name, hr);
-            break;
-        }
-
-        hr = InDevice->CreateRootSignature(0, signatureBlob->GetBufferPointer(), signatureBlob->GetBufferSize(),
-                                           IID_PPV_ARGS(&_rootSignature));
-
-        if (FAILED(hr))
-        {
-            LOG_ERROR("[{0}] CreateRootSignature error {1:x}", _name, hr);
-            break;
-        }
-
-    } while (false);
-
-    if (errorBlob != nullptr)
-    {
-        errorBlob->Release();
-        errorBlob = nullptr;
-    }
-
-    if (signatureBlob != nullptr)
-    {
-        signatureBlob->Release();
-        signatureBlob = nullptr;
-    }
-
-    if (_rootSignature == nullptr)
-    {
-        LOG_ERROR("[{0}] _rootSignature is null!", _name);
+        LOG_ERROR("[{0}] Failed to create compute pipeline", _name);
         return;
     }
 
-    if (Config::Instance()->UsePrecompiledShaders.value_or_default())
-    {
-        D3D12_COMPUTE_PIPELINE_STATE_DESC computePsoDesc = {};
-        computePsoDesc.pRootSignature = _rootSignature;
-        computePsoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
-        computePsoDesc.CS = CD3DX12_SHADER_BYTECODE(reinterpret_cast<const void*>(HudCopy_cso), sizeof(HudCopy_cso));
-        auto hr = InDevice->CreateComputePipelineState(&computePsoDesc, __uuidof(ID3D12PipelineState*),
-                                                       (void**) &_pipelineState);
-
-        if (FAILED(hr))
-        {
-            LOG_ERROR("[{0}] CreateComputePipelineState error: {1:X}", _name, hr);
-            return;
-        }
-    }
-    else
-    {
-        // Compile shader blobs
-        ID3DBlob* _recEncodeShader = nullptr;
-
-        _recEncodeShader = HudCopy_CompileShader(shaderCode.c_str(), "CSMain", "cs_5_0");
-
-        if (_recEncodeShader == nullptr)
-            LOG_ERROR("[{0}] CompileShader error!", _name);
-
-        // create pso objects
-        if (!Shader_Dx12::CreateComputeShader(
-                InDevice, _rootSignature, &_pipelineState, _recEncodeShader,
-                CD3DX12_SHADER_BYTECODE(reinterpret_cast<const void*>(HudCopy_cso), sizeof(HudCopy_cso))))
-        {
-            LOG_ERROR("[{0}] CreateComputeShader error!", _name);
-            return;
-        }
-
-        if (_recEncodeShader != nullptr)
-        {
-            _recEncodeShader->Release();
-            _recEncodeShader = nullptr;
-        }
-    }
-
-    ScopedSkipHeapCapture skipHeapCapture {};
-
-    for (int i = 0; i < HudCopy_NUM_OF_HEAPS; i++)
-    {
-        if (!_frameHeaps[i].Initialize(InDevice, 2, 1, 1))
-        {
-            LOG_ERROR("[{0}] Failed to init heap", _name);
-            _init = false;
-            return;
-        }
-    }
-
-    _init = true;
+    _init = InitHeaps(InDevice, _frameHeaps, HudCopy_NUM_OF_HEAPS);
 }
 
 HudCopy_Dx12::~HudCopy_Dx12()
@@ -286,32 +144,10 @@ HudCopy_Dx12::~HudCopy_Dx12()
     if (!_init || State::Instance().isShuttingDown)
         return;
 
-    if (_pipelineState != nullptr)
-    {
-        _pipelineState->Release();
-        _pipelineState = nullptr;
-    }
-
-    if (_rootSignature != nullptr)
-    {
-        _rootSignature->Release();
-        _rootSignature = nullptr;
-    }
-
     for (int i = 0; i < HudCopy_NUM_OF_HEAPS; i++)
     {
         _frameHeaps[i].ReleaseHeaps();
     }
 
-    if (_buffer != nullptr)
-    {
-        _buffer->Release();
-        _buffer = nullptr;
-    }
-
-    if (_constantBuffer != nullptr)
-    {
-        _constantBuffer->Release();
-        _constantBuffer = nullptr;
-    }
+    SAFE_RELEASE(_buffer);
 }

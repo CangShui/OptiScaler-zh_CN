@@ -22,12 +22,13 @@ class FSR4ModelSelection
     static uint64_t hkcreateModelDriver(void* context, uint32_t preset);
     static PFN_createModel o_createModelSDK;
     static PFN_createModel o_createModelDriver;
-    static uint64_t hkcreateModelDriver2(void* context, uint32_t preset, void** model);
-    static PFN_createModel2 o_createModelDriver2;
     static uint64_t hkcreateModelSDK2(void* context, uint32_t preset, void** model);
+    static uint64_t hkcreateModelDriver2(void* context, uint32_t preset, void** model);
     static PFN_createModel2 o_createModelSDK2;
+    static PFN_createModel2 o_createModelDriver2;
 
   public:
     static void Hook(HMODULE module, FSR4Source source);
-    static bool IsInt8FsrHooked() { return o_createModelDriver2 || o_createModelSDK2; };
+    static bool IsCreateModelDriver2Hooked() { return o_createModelDriver2; };
+    static bool IsInt8FsrHooked() { return o_createModelSDK2 || o_createModelDriver2; };
 };

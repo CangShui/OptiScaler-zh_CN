@@ -6,6 +6,7 @@
 
 #include <include/detours/detours.h>
 #include <include/d3dx/d3dx12.h>
+#include <imgui/ImGuiNotify.hpp>
 
 inline void XeSSLogCallback(const char* Message, xess_logging_level_t Level)
 {
@@ -19,6 +20,8 @@ bool XeSSFeature::InitXeSS(ID3D12Device* device, const NVSDK_NGX_Parameter* InPa
 
     if (!_moduleLoaded)
     {
+        ImGui::InsertNotification(
+            { ImGuiToastType::Warning, 10000, "Couldn't load libxess.dll\nCheck if the dll is present" });
         LOG_ERROR("libxess.dll not loaded!");
         return false;
     }
@@ -34,14 +37,17 @@ bool XeSSFeature::InitXeSS(ID3D12Device* device, const NVSDK_NGX_Parameter* InPa
 
     {
 #ifndef DONT_USE_XMX
-        ScopedSkipSpoofing skipSpoofing {};
+        ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
 #endif // !DONT_USE_XMX
 
         auto ret = XeSSProxy::D3D12CreateContext()(device, &_xessContext);
 
         if (ret != XESS_RESULT_SUCCESS)
         {
-            LOG_ERROR("xessD3D12CreateContext error: {0}", ResultToString(ret));
+            auto str = ResultToString(ret);
+            ImGui::InsertNotification(
+                { ImGuiToastType::Error, 10000, std::format("Couldn't create XeSS context\n{}", str).c_str() });
+            LOG_ERROR("xessD3D12CreateContext error: {0}", str);
             return false;
         }
 
@@ -61,10 +67,13 @@ bool XeSSFeature::InitXeSS(ID3D12Device* device, const NVSDK_NGX_Parameter* InPa
 
         xessParams.initFlags = XESS_INIT_FLAG_NONE;
 
+        const bool isUE = State::Instance().NVNGX_Engine == NVSDK_NGX_ENGINE_TYPE_UNREAL ||
+                          State::Instance().gameQuirks & GameQuirk::ForceUnrealEngine;
+
         if (DepthInverted())
             xessParams.initFlags |= XESS_INIT_FLAG_INVERTED_DEPTH;
 
-        if (AutoExposure())
+        if (AutoExposure() || isUE)
             xessParams.initFlags |= XESS_INIT_FLAG_ENABLE_AUTOEXPOSURE;
         else
             xessParams.initFlags |= XESS_INIT_FLAG_EXPOSURE_SCALE_TEXTURE;
@@ -190,7 +199,7 @@ bool XeSSFeature::InitXeSS(ID3D12Device* device, const NVSDK_NGX_Parameter* InPa
         xessParams.outputResolution.y = TargetHeight();
 
         // create heaps to prevent create heap errors of xess
-        if (Config::Instance()->CreateHeaps.value_or(true))
+        if (Config::Instance()->CreateHeaps.value_or_default())
         {
             HRESULT hr;
             xess_properties_t xessProps {};
@@ -198,7 +207,8 @@ bool XeSSFeature::InitXeSS(ID3D12Device* device, const NVSDK_NGX_Parameter* InPa
 
             if (ret == XESS_RESULT_SUCCESS)
             {
-                CD3DX12_HEAP_DESC bufferHeapDesc(xessProps.tempBufferHeapSize, D3D12_HEAP_TYPE_DEFAULT);
+                CD3DX12_HEAP_DESC bufferHeapDesc(xessProps.tempBufferHeapSize, D3D12_HEAP_TYPE_DEFAULT, 0,
+                                                 D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS);
 
                 {
                     ScopedSkipHeapCapture skipHeapCapture {};
@@ -247,7 +257,7 @@ bool XeSSFeature::InitXeSS(ID3D12Device* device, const NVSDK_NGX_Parameter* InPa
         }
 
         // try to build pipelines with local pipeline object
-        if (Config::Instance()->BuildPipelines.value_or(true) && Version() > feature_version { 1, 2, 0 })
+        if (Config::Instance()->BuildPipelines.value_or_default() && Version() > feature_version { 1, 2, 0 })
         {
             LOG_DEBUG("xessD3D12BuildPipelines!");
             ScopedSkipHeapCapture skipHeapCapture {};
@@ -337,21 +347,7 @@ XeSSFeature::~XeSSFeature()
         _xessContext = nullptr;
     }
 
-    if (_localPipeline != nullptr)
-    {
-        _localPipeline->Release();
-        _localPipeline = nullptr;
-    }
-
-    if (_localBufferHeap != nullptr)
-    {
-        _localBufferHeap->Release();
-        _localBufferHeap = nullptr;
-    }
-
-    if (_localTextureHeap != nullptr)
-    {
-        _localTextureHeap->Release();
-        _localTextureHeap = nullptr;
-    }
+    SAFE_RELEASE(_localPipeline);
+    SAFE_RELEASE(_localBufferHeap);
+    SAFE_RELEASE(_localTextureHeap);
 }

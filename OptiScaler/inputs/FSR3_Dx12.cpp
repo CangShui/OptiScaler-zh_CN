@@ -253,12 +253,15 @@ static Fsr3::FfxErrorCode ffxFsr3ContextCreate_Dx12(Fsr3::FfxFsr3UpscalerContext
         _d3d12Device = state.d3d12Devices[state.d3d12Devices.size() - 1];
 
     if (_d3d12Device == nullptr)
+        _d3d12Device = state.currentD3D12Device;
+
+    if (_d3d12Device == nullptr)
     {
-        LOG_WARN("D3D12 device not found!");
+        LOG_ERROR("D3D12 device not found!");
         return ccResult;
     }
 
-    if (!state.NvngxDx12Inited)
+    if (!state.nvngxDx12Inited)
     {
         NVSDK_NGX_FeatureCommonInfo fcInfo {};
         auto exePath = Util::ExePath().remove_filename();
@@ -372,7 +375,7 @@ static Fsr3::FfxErrorCode ffxFsr3ContextDispatch_Dx12(Fsr3::FfxFsr3UpscalerConte
     LOG_DEBUG("handle: {:X}, internalResolution: {}x{}", handle->Id, pDispatchDescription->renderSize.width,
               pDispatchDescription->renderSize.height);
 
-    State::Instance().setInputApiName = "FSR3-DX12";
+    State::Instance().setInputApiName = ApiUpscalerInput::FSR3_DX12;
 
     auto evalResult = NVSDK_NGX_D3D12_EvaluateFeature((ID3D12GraphicsCommandList*) pDispatchDescription->commandList,
                                                       handle, params, nullptr);
@@ -454,12 +457,15 @@ ffxFsr3ContextCreate_Pattern_Dx12(Fsr3::FfxFsr3UpscalerContext* pContext,
         _d3d12Device = state.d3d12Devices[state.d3d12Devices.size() - 1];
 
     if (_d3d12Device == nullptr)
+        _d3d12Device = state.currentD3D12Device;
+
+    if (_d3d12Device == nullptr)
     {
-        LOG_WARN("D3D12 device not found!");
+        LOG_ERROR("D3D12 device not found!");
         return ccResult;
     }
 
-    if (!state.NvngxDx12Inited)
+    if (!state.nvngxDx12Inited)
     {
         NVSDK_NGX_FeatureCommonInfo fcInfo {};
 
@@ -565,7 +571,7 @@ ffxFsr3ContextDispatch_Pattern_Dx12(Fsr3::FfxFsr3UpscalerContext* pContext,
     LOG_DEBUG("handle: {:X}, internalResolution: {}x{}", handle->Id, pDispatchDescription->renderSize.width,
               pDispatchDescription->renderSize.height);
 
-    State::Instance().setInputApiName = "FSR3-DX12";
+    State::Instance().setInputApiName = ApiUpscalerInput::FSR3_DX12;
 
     auto evalResult = NVSDK_NGX_D3D12_EvaluateFeature((ID3D12GraphicsCommandList*) pDispatchDescription->commandList,
                                                       handle, params, nullptr);

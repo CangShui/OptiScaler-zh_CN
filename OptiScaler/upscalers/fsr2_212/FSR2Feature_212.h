@@ -62,7 +62,6 @@ class FSR2Feature212 : public virtual IFeature
 
   public:
     feature_version Version() override { return _version; }
-    std::string Name() const override { return "FSR"; }
 
     FSR2Feature212(unsigned int InHandleId, NVSDK_NGX_Parameter* InParameters) : IFeature(InHandleId, InParameters)
     {

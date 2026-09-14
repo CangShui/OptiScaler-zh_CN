@@ -28,7 +28,7 @@ inline int FrameLimit::timer_sleep(int64_t hundred_ns)
     if (!SetWaitableTimerEx(timer, &due_time, 0, NULL, NULL, NULL, 0))
         return 2;
 
-    if (WaitForSingleObject(timer, INFINITE) != WAIT_OBJECT_0)
+    if (WaitForSingleObject(timer, 1000) != WAIT_OBJECT_0)
         return 3;
 
     return 0;

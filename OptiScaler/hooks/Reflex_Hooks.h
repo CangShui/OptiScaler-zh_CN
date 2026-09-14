@@ -3,6 +3,7 @@
 #include <nvapi/NvApiTypes.h>
 
 #include "Hook_Utils.h"
+#include "low_latency/ll_util.h"
 
 enum TimingType : uint32_t
 {
@@ -17,22 +18,17 @@ enum TimingType : uint32_t
     TimingTypeCOUNT
 };
 
-// Normalized values, position + length <= 1
-struct TimingEntry
-{
-    double position;
-    double length;
-};
-
 class ReflexHooks
 {
     inline static bool _inited = false;
     inline static uint32_t _minimumIntervalUs = 0;
     inline static NV_SET_SLEEP_MODE_PARAMS _lastSleepParams {};
     inline static IUnknown* _lastSleepDev = nullptr;
-    inline static bool _dlssgDetected = false;
+    inline static uint8_t _FgNumFramesToGenerate = 0;
     inline static uint64_t _lastAsyncMarkerFrameId = 0;
     inline static uint64_t _updatesWithoutMarker = 0;
+
+    inline static uint64_t _lastMarkerFrame = 0;
 
     inline static NV_VULKAN_SET_SLEEP_MODE_PARAMS _lastVkSleepParams {};
     inline static HANDLE _lastVkSleepDev = nullptr;
@@ -41,6 +37,7 @@ class ReflexHooks
 
     // D3D
     inline static decltype(&NvAPI_D3D_SetSleepMode) o_NvAPI_D3D_SetSleepMode = nullptr;
+    inline static decltype(&NvAPI_D3D_GetSleepStatus) o_NvAPI_D3D_GetSleepStatus = nullptr;
     inline static decltype(&NvAPI_D3D_Sleep) o_NvAPI_D3D_Sleep = nullptr;
     inline static decltype(&NvAPI_D3D_GetLatency) o_NvAPI_D3D_GetLatency = nullptr;
     inline static decltype(&NvAPI_D3D_SetLatencyMarker) o_NvAPI_D3D_SetLatencyMarker = nullptr;
@@ -56,11 +53,13 @@ class ReflexHooks
     // Vulkan
     inline static decltype(&NvAPI_Vulkan_SetLatencyMarker) o_NvAPI_Vulkan_SetLatencyMarker = nullptr;
     inline static decltype(&NvAPI_Vulkan_SetSleepMode) o_NvAPI_Vulkan_SetSleepMode = nullptr;
+    inline static decltype(&NvAPI_Vulkan_GetLatency) o_NvAPI_Vulkan_GetLatency = nullptr;
 
     static NvAPI_Status hkNvAPI_Vulkan_SetLatencyMarker(HANDLE vkDevice,
                                                         NV_VULKAN_LATENCY_MARKER_PARAMS* pSetLatencyMarkerParams);
     static NvAPI_Status hkNvAPI_Vulkan_SetSleepMode(HANDLE vkDevice,
                                                     NV_VULKAN_SET_SLEEP_MODE_PARAMS* pSetSleepModeParams);
+    static NvAPI_Status hkNvAPI_Vulkan_GetLatency(HANDLE vkDevice, NV_VULKAN_LATENCY_RESULT_PARAMS* pGetLatencyParams);
 
     VALIDATE_MEMBER_HOOK(hkNvAPI_D3D_SetSleepMode, decltype(&NvAPI_D3D_SetSleepMode))
     VALIDATE_MEMBER_HOOK(hkNvAPI_D3D_Sleep, decltype(&NvAPI_D3D_Sleep))
@@ -69,20 +68,22 @@ class ReflexHooks
     VALIDATE_MEMBER_HOOK(hkNvAPI_D3D12_SetAsyncFrameMarker, decltype(&NvAPI_D3D12_SetAsyncFrameMarker))
     VALIDATE_MEMBER_HOOK(hkNvAPI_Vulkan_SetLatencyMarker, decltype(&NvAPI_Vulkan_SetLatencyMarker))
     VALIDATE_MEMBER_HOOK(hkNvAPI_Vulkan_SetSleepMode, decltype(&NvAPI_Vulkan_SetSleepMode))
+    VALIDATE_MEMBER_HOOK(hkNvAPI_Vulkan_GetLatency, decltype(&NvAPI_Vulkan_GetLatency))
 
   public:
     static std::optional<TimingEntry> timingData[TimingType::TimingTypeCOUNT];
 
     static void hookReflex(PFN_NvApi_QueryInterface& queryInterface);
-    static bool isDlssgDetected();
-    static void setDlssgDetectedState(bool state);
+    static uint8_t dlssgFrameCountToGenerate();
+    static void setDlssgFrameCount(uint8_t count);
     static bool isReflexHooked();
     static void* getHookedReflex(unsigned int InterfaceId);
     static bool updateTimingData();
+    static bool gameIsSendingMarkers();
 
     // For updating information about Reflex hooks
     static void update(bool optiFg_FgState, bool isVulkan);
 
     // 0 - disables the fps cap
-    inline static void setFPSLimit(float fps);
+    static void setFPSLimit(float fps);
 };

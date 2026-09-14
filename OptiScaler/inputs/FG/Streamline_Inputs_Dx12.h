@@ -14,7 +14,7 @@ class Sl_Inputs_Dx12
 
     uint32_t _currentFrameId = 0;
     uint32_t _currentIndex = -1;
-    uint32_t _lastFrameId = UINT32_MAX;
+    uint32_t _lastPresentFrameId = UINT32_MAX;
     uint32_t _frameIdIndex[BUFFER_COUNT] = { UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX };
 
     uint64_t mvsWidth = 0;
@@ -25,7 +25,7 @@ class Sl_Inputs_Dx12
 
   public:
     bool setConstants(const sl::Constants& constants, uint32_t frameId);
-    bool evaluateState(ID3D12Device* device);
+    bool evaluateState();
     bool reportResource(const sl::ResourceTag& tag, ID3D12GraphicsCommandList* cmdBuffer, uint32_t frameId);
     void reportEngineType(sl::EngineType type) { engineType = type; };
     bool dispatchFG();

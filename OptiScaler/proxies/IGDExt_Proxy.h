@@ -210,8 +210,8 @@ class IGDExtProxy
 
         INTCExtensionAppInfo1 appInfo {};
 
-        appInfo.pApplicationName = string_to_wstring(State::Instance().GameName.empty() ? State::Instance().GameExe
-                                                                                        : State::Instance().GameName)
+        appInfo.pApplicationName = string_to_wstring(State::Instance().gameName.empty() ? State::Instance().gameExe
+                                                                                        : State::Instance().gameName)
                                        .c_str();
 
         appInfo.pApplicationName = L"Unreal Engine";
@@ -325,7 +325,7 @@ class IGDExtProxy
         if (_atomicSupportEnabled)
             return;
 
-        ScopedSkipSpoofing skipSpoofing {};
+        ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
 
         if (CreateContext(device))
         {

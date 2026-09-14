@@ -1,18 +1,9 @@
 #pragma once
 
 #include "SysUtils.h"
-#include <Util.h>
 #include <Config.h>
-#include <resource.h>
-#include <Logger.h>
 
 #include <imgui/imgui.h>
-#include <imgui/imgui_impl_win32.h>
-#include <imgui/imgui_impl_uwp.h>
-
-#include <detours/detours.h>
-
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 class ScopedIndent
 {
@@ -61,6 +52,7 @@ template <typename T> struct MenuOption
     std::string label;
     std::string tooltip;
     bool disabled = false;
+    bool hidden = false;
 
     MenuOption& set_disabled(bool condition, const std::string& reason = "")
     {
@@ -72,6 +64,15 @@ template <typename T> struct MenuOption
         }
         return *this;
     }
+
+    MenuOption& set_hidden(bool condition)
+    {
+        if (condition)
+        {
+            hidden = true;
+        }
+        return *this;
+    }
 };
 
 class MenuCommon
@@ -79,11 +80,10 @@ class MenuCommon
   private:
     // internal values
     inline static HWND _handle = nullptr;
-    inline static WNDPROC _oWndProc = nullptr;
+    // inline static WNDPROC _oWndProc = nullptr;
     inline static bool _isVisible = false;
     inline static bool _isInited = false;
     inline static bool _isUWP = false;
-    // inline static bool _isResetRequested = false;
 
     // mipmap calculations
     inline static bool _showMipmapCalcWindow = false;
@@ -94,9 +94,6 @@ class MenuCommon
     inline static float _mipmapUpscalerRatio = 0;
     inline static uint32_t _displayWidth = 0;
     inline static uint32_t _renderWidth = 0;
-
-    // dlss enabler
-    inline static int _deLimitFps = 500;
 
     inline static UINT64 _frameCount = 0;
 
@@ -128,65 +125,61 @@ class MenuCommon
 
     inline static void SeparatorWithHelpMarker(const char* label, const char* tip);
 
-#pragma region "Hooks & WndProc"
-
-    // for hooking
-    typedef decltype(&SetCursorPos) PFN_SetCursorPos;
-    typedef decltype(&ClipCursor) PFN_ClipCursor;
-    typedef decltype(&SendInput) PFN_SendInput;
-    typedef decltype(&mouse_event) PFN_mouse_event;
-    typedef decltype(&GetCursorPos) PFN_GetCursorPos;
-    typedef decltype(&SendMessageW) PFN_SendMessageW;
-
-    inline static PFN_SetCursorPos pfn_SetPhysicalCursorPos = nullptr;
-    inline static PFN_SetCursorPos pfn_SetCursorPos = nullptr;
-    inline static PFN_ClipCursor pfn_ClipCursor = nullptr;
-    inline static PFN_mouse_event pfn_mouse_event = nullptr;
-    inline static PFN_SendInput pfn_SendInput = nullptr;
-    inline static PFN_SendMessageW pfn_SendMessageW = nullptr;
-    inline static PFN_GetCursorPos pfn_GetCursorPos = nullptr;
-
-    inline static bool pfn_SetPhysicalCursorPos_hooked = false;
-    inline static bool pfn_SetCursorPos_hooked = false;
-    inline static bool pfn_ClipCursor_hooked = false;
-    inline static bool pfn_mouse_event_hooked = false;
-    inline static bool pfn_SendInput_hooked = false;
-    inline static bool pfn_SendMessageW_hooked = false;
-
-    inline static RECT _cursorLimit = {};
-    inline static POINT _lastPoint = {};
-
-    static LRESULT hkSendMessageW(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam);
-
-    static BOOL hkSetPhysicalCursorPos(int x, int y);
-    static BOOL hkSetCursorPos(int x, int y);
-    static BOOL hkClipCursor(RECT* lpRect);
-    static void hkmouse_event(DWORD dwFlags, DWORD dx, DWORD dy, DWORD dwData, ULONG_PTR dwExtraInfo);
-    static UINT hkSendInput(UINT cInputs, LPINPUT pInputs, int cbSize);
-    static BOOL hkGetPhysicalCursorPos(LPPOINT lpPoint);
-
-    static void AttachHooks();
-    static void DetachHooks();
-
-    inline static ImGuiKey ImGui_ImplWin32_VirtualKeyToImGuiKey(WPARAM wParam);
-
-    // Win32 message handler
-    static LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-
-#pragma endregion
-
-    static std::string GetBackendName(std::string* code);
-    static std::string GetBackendCode(const API api);
-    static void GetCurrentBackendInfo(const API api, std::string* code, std::string* name);
-    static void AddDx11Backends(std::string* code, std::string* name);
-    static void AddDx12Backends(std::string* code, std::string* name);
-    static void AddVulkanBackends(std::string* code, std::string* name);
+    static Upscaler GetBackendCode(const API api);
+    static void GetCurrentBackendInfo(const API api, Upscaler& upscaler, std::string* name);
+    static void RenderUpscalerCombo(const API api, Upscaler currentUpscaler, const std::vector<Upscaler>& options);
+    static void AddDx11Backends(Upscaler upscaler);
+    static void AddDx12Backends(Upscaler upscaler);
+    static void AddVulkanBackends(Upscaler upscaler);
     template <HasDefaultValue B> static void AddResourceBarrier(std::string name, CustomOptional<int32_t, B>* value);
     template <HasDefaultValue B> static void AddDLSSRenderPreset(std::string name, CustomOptional<uint32_t, B>* value);
     template <HasDefaultValue B> static void AddDLSSDRenderPreset(std::string name, CustomOptional<uint32_t, B>* value);
     template <typename TStorage, typename T>
     static void PopulateCombo(const std::string& name, TStorage& currentValue,
                               const std::vector<MenuOption<T>>& options);
+
+    struct RenderMenuContext;
+
+    // RenderMenu orchestration helpers. These keep the public RenderMenu() flow short
+    // while preserving the original ImGui layout and draw order.
+    static void UpdateRenderTiming(RenderMenuContext& ctx);
+    static void UpdateMenuInputMode(RenderMenuContext& ctx);
+    static void HandleMenuShortcuts(RenderMenuContext& ctx);
+    static void UpdateVersionAndStartupNotifications(RenderMenuContext& ctx);
+    static void BeginMenuFrameIfNeeded(RenderMenuContext& ctx);
+    static void RenderSplashWindow(RenderMenuContext& ctx);
+    static void RenderNotifications(RenderMenuContext& ctx);
+    static void UpdateFrameTimeAverages(RenderMenuContext& ctx);
+    static void RenderPerformanceOverlay(RenderMenuContext& ctx);
+    static void RenderMainMenuWindow(RenderMenuContext& ctx);
+
+    // RenderMainMenuWindow section helpers. These keep the main window flow readable
+    // without changing the existing ImGui layout, labels, or setting side effects.
+    static void RenderMainMenuHeaderMessages(RenderMenuContext& ctx);
+    static void RenderMainMenuTable(RenderMenuContext& ctx);
+    static void RenderActiveUpscalerSettings(RenderMenuContext& ctx);
+    static void RenderFrameGenerationSelection(RenderMenuContext& ctx);
+    static void RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx);
+    static void RenderFsrCommonSettings(RenderMenuContext& ctx);
+    static void RenderFramerateSettings(RenderMenuContext& ctx);
+    static void RenderFakenvapiSettings(RenderMenuContext& ctx);
+    static void RenderLowLatencySettings(RenderMenuContext& ctx);
+    static void RenderActiveImageSettings(RenderMenuContext& ctx);
+    static void RenderMagnifierSettings(RenderMenuContext& ctx);
+    static void RenderQuirksSettings(RenderMenuContext& ctx);
+    static void RenderAdvancedSettings(RenderMenuContext& ctx);
+    static void RenderLoggingSettings(RenderMenuContext& ctx);
+    static void RenderThemeSettings(RenderMenuContext& ctx);
+    static void RenderFpsOverlaySettings(RenderMenuContext& ctx);
+    static void RenderUpscalerInputsSettings(RenderMenuContext& ctx);
+    static void RenderApiAndTextureSettings(RenderMenuContext& ctx);
+    static void RenderKeybindSettings(RenderMenuContext& ctx);
+    static void RenderMainMenuGraphs(RenderMenuContext& ctx);
+    static void RenderMainMenuBottomBar(RenderMenuContext& ctx);
+    static void RenderMipmapBiasWindow(RenderMenuContext& ctx, ImGuiWindowFlags flags);
+    static void RenderHudlessResourcesWindow(RenderMenuContext& ctx, ImGuiWindowFlags flags);
+
+    static void UpdateManualInput(HWND targetHwnd);
 
   public:
     static void Dx11Inited() { _dx11Ready = true; }
@@ -201,4 +194,5 @@ class MenuCommon
     static void Shutdown();
     static void HideMenu();
     static void Present();
+    static void ApplyThemeStyle();
 };

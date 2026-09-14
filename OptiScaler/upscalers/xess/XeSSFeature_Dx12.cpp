@@ -1,52 +1,27 @@
-#pragma once
 #include <pch.h>
 #include <Config.h>
 
 #include "XeSSFeature_Dx12.h"
 
-bool XeSSFeatureDx12::Init(ID3D12Device* InDevice, ID3D12GraphicsCommandList* InCommandList,
-                           NVSDK_NGX_Parameter* InParameters)
+bool XeSSFeatureDx12::InitInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters)
 {
     LOG_FUNC();
 
     if (IsInited())
         return true;
 
-    Device = InDevice;
-
-    if (InitXeSS(InDevice, InParameters))
-    {
-        if (!Config::Instance()->OverlayMenu.value_or(true) && (Imgui == nullptr || Imgui.get() == nullptr))
-            Imgui = std::make_unique<Menu_Dx12>(Util::GetProcessWindow(), InDevice);
-
-        OutputScaler = std::make_unique<OS_Dx12>("Output Scaling", InDevice, (TargetWidth() < DisplayWidth()));
-        RCAS = std::make_unique<RCAS_Dx12>("RCAS", InDevice);
-        Bias = std::make_unique<Bias_Dx12>("Bias", InDevice);
-
-        return true;
-    }
-
-    return false;
+    return InitXeSS(Device, InParameters);
 }
 
-bool XeSSFeatureDx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters)
+bool XeSSFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters)
 {
     LOG_FUNC();
 
-    if (!IsInited() || !_xessContext || !ModuleLoaded())
+    if (!_xessContext || !ModuleLoaded())
     {
         LOG_ERROR("Not inited!");
         return false;
     }
-
-    if (!RCAS->IsInit())
-        Config::Instance()->RcasEnabled = false;
-
-    if (!OutputScaler->IsInit())
-        Config::Instance()->OutputScalingEnabled = false;
-
-    if (Config::Instance()->DADepthIsLinear.value_for_config_ignore_default() == std::nullopt)
-        Config::Instance()->DADepthIsLinear.set_volatile_value(false);
 
     xess_result_t xessResult;
 
@@ -57,7 +32,8 @@ bool XeSSFeatureDx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_N
         xess_dump_parameters_t dumpParams {};
         dumpParams.frame_count = State::Instance().xessDebugFrames;
         dumpParams.frame_idx = dumpCount;
-        dumpParams.path = wstring_to_string(Util::DllPath().wstring()).c_str();
+        auto path = wstring_to_string(Util::DllPath().wstring());
+        dumpParams.path = path.c_str();
         dumpParams.dump_elements_mask = XESS_DUMP_INPUT_COLOR | XESS_DUMP_INPUT_VELOCITY | XESS_DUMP_INPUT_DEPTH |
                                         XESS_DUMP_OUTPUT | XESS_DUMP_EXECUTION_PARAMETERS | XESS_DUMP_HISTORY;
 
@@ -83,13 +59,6 @@ bool XeSSFeatureDx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_N
 
     GetRenderResolution(InParameters, &params.inputWidth, &params.inputHeight);
 
-    _sharpness = GetSharpness(InParameters);
-
-    float ssMulti = Config::Instance()->OutputScalingMultiplier.value_or(1.5f);
-
-    bool useSS =
-        Config::Instance()->OutputScalingEnabled.value_or_default() && (LowResMV() || RenderWidth() == DisplayWidth());
-
     LOG_DEBUG("Input Resolution: {0}x{1}", params.inputWidth, params.inputHeight);
 
     ID3D12Resource* paramColor;
@@ -108,7 +77,7 @@ bool XeSSFeatureDx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_N
                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
         else if (State::Instance().NVNGX_Engine == NVSDK_NGX_ENGINE_TYPE_UNREAL ||
-                 State::Instance().GameEngine == GameEngineType::Unreal ||
+                 State::Instance().gameEngine == GameEngineType::Unreal ||
                  State::Instance().gameQuirks & GameQuirk::ForceUnrealEngine)
         {
             Config::Instance()->ColorResourceBarrier.set_volatile_value(D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -139,7 +108,7 @@ bool XeSSFeatureDx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_N
                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         }
         else if (State::Instance().NVNGX_Engine == NVSDK_NGX_ENGINE_TYPE_UNREAL ||
-                 State::Instance().GameEngine == GameEngineType::Unreal ||
+                 State::Instance().gameEngine == GameEngineType::Unreal ||
                  State::Instance().gameQuirks & GameQuirk::ForceUnrealEngine)
         {
             Config::Instance()->MVResourceBarrier.set_volatile_value(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -170,29 +139,7 @@ bool XeSSFeatureDx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_N
                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
 
-        if (useSS)
-        {
-            if (OutputScaler->CreateBufferResource(Device, paramOutput, TargetWidth(), TargetHeight(),
-                                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
-            {
-                OutputScaler->SetBufferState(InCommandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                params.pOutputTexture = OutputScaler->Buffer();
-            }
-            else
-                params.pOutputTexture = paramOutput;
-        }
-        else
-            params.pOutputTexture = paramOutput;
-
-        if (Config::Instance()->RcasEnabled.value_or(true) &&
-            (_sharpness > 0.0f || (Config::Instance()->MotionSharpnessEnabled.value_or(false) &&
-                                   Config::Instance()->MotionSharpness.value_or(0.4) > 0.0f)) &&
-            RCAS->IsInit() &&
-            RCAS->CreateBufferResource(Device, params.pOutputTexture, D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
-        {
-            RCAS->SetBufferState(InCommandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            params.pOutputTexture = RCAS->Buffer();
-        }
+        params.pOutputTexture = paramOutput;
     }
     else
     {
@@ -240,7 +187,7 @@ bool XeSSFeatureDx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_N
         else
         {
             LOG_WARN("AutoExposure disabled but ExposureTexture is not exist, it may cause problems!!");
-            State::Instance().AutoExposure = true;
+            State::Instance().autoExposure = true;
             State::Instance().changeBackend[_handle->Id] = true;
             return true;
         }
@@ -297,7 +244,7 @@ bool XeSSFeatureDx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_N
             {
                 Bias->SetBufferState(InCommandList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-                if (Bias->Dispatch(Device, InCommandList, paramReactiveMask,
+                if (Bias->Dispatch(InCommandList, paramReactiveMask,
                                    Config::Instance()->DlssReactiveMaskBias.value_or_default(), Bias->Buffer()))
                 {
                     Bias->SetBufferState(InCommandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -359,78 +306,6 @@ bool XeSSFeatureDx12::Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_N
     {
         LOG_ERROR("xessD3D12Execute error: {0}", ResultToString(xessResult));
         return false;
-    }
-
-    // Apply RCAS
-    if (Config::Instance()->RcasEnabled.value_or(true) &&
-        (_sharpness > 0.0f || (Config::Instance()->MotionSharpnessEnabled.value_or(false) &&
-                               Config::Instance()->MotionSharpness.value_or(0.4) > 0.0f)) &&
-        RCAS->CanRender())
-    {
-        if (params.pOutputTexture != RCAS->Buffer())
-            ResourceBarrier(InCommandList, params.pOutputTexture, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-        RCAS->SetBufferState(InCommandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-        RcasConstants rcasConstants {};
-
-        rcasConstants.Sharpness = _sharpness;
-        InParameters->Get(NVSDK_NGX_Parameter_MV_Scale_X, &rcasConstants.MvScaleX);
-        InParameters->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &rcasConstants.MvScaleY);
-        rcasConstants.CameraNear = Config::Instance()->FsrCameraNear.value_or_default();
-        rcasConstants.CameraFar = Config::Instance()->FsrCameraFar.value_or_default();
-
-        if (useSS)
-        {
-            if (!RCAS->Dispatch(Device, InCommandList, params.pOutputTexture, params.pVelocityTexture, rcasConstants,
-                                OutputScaler->Buffer(), params.pDepthTexture))
-            {
-                Config::Instance()->RcasEnabled = false;
-                return true;
-            }
-        }
-        else
-        {
-            if (!RCAS->Dispatch(Device, InCommandList, params.pOutputTexture, params.pVelocityTexture, rcasConstants,
-                                paramOutput, params.pDepthTexture))
-            {
-                Config::Instance()->RcasEnabled = false;
-                return true;
-            }
-        }
-    }
-
-    if (useSS)
-    {
-        LOG_DEBUG("scaling output...");
-        OutputScaler->SetBufferState(InCommandList, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-        if (!OutputScaler->Dispatch(Device, InCommandList, OutputScaler->Buffer(), paramOutput))
-        {
-            Config::Instance()->OutputScalingEnabled = false;
-            State::Instance().changeBackend[_handle->Id] = true;
-            return true;
-        }
-    }
-
-    // imgui
-    if (!Config::Instance()->OverlayMenu.value_or(true) && _frameCount > 30)
-    {
-        if (Imgui != nullptr && Imgui.get() != nullptr)
-        {
-            if (Imgui->IsHandleDifferent())
-            {
-                Imgui.reset();
-            }
-            else
-                Imgui->Render(InCommandList, paramOutput);
-        }
-        else
-        {
-            if (Imgui == nullptr || Imgui.get() == nullptr)
-                Imgui = std::make_unique<Menu_Dx12>(GetForegroundWindow(), Device);
-        }
     }
 
     // restore resource states

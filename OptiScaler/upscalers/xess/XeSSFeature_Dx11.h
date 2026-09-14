@@ -23,10 +23,11 @@ class XeSSFeature_Dx11 : public virtual IFeature_Dx11
         return feature_version { XeSSProxy::VersionDx11().major, XeSSProxy::VersionDx11().minor,
                                  XeSSProxy::VersionDx11().patch };
     }
-    std::string Name() const { return "XeSS"; }
 
-    bool Init(ID3D11Device* InDevice, ID3D11DeviceContext* InContext, NVSDK_NGX_Parameter* InParameters) override;
-    bool Evaluate(ID3D11DeviceContext* DeviceContext, NVSDK_NGX_Parameter* InParameters) override;
+    bool InitInternal(ID3D11DeviceContext* InContext, NVSDK_NGX_Parameter* InParameters) override;
+    bool EvaluateInternal(ID3D11DeviceContext* DeviceContext, NVSDK_NGX_Parameter* InParameters) override;
+    Upscaler GetUpscalerType() const final { return Upscaler::XeSS; }
+    API Api() const override { return IFeature_Dx11::Api(); }
 
     bool IsWithDx12() final { return false; }
 

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "SysUtils.h"
 
 #include <proxies/Kernel32_Proxy.h>
@@ -28,6 +28,8 @@ class KernelHooks
     inline static Kernel32Proxy::PFN_LoadLibraryExW o_K32_LoadLibraryExW = nullptr;
     inline static Kernel32Proxy::PFN_GetProcAddress o_K32_GetProcAddress = nullptr;
     inline static Kernel32Proxy::PFN_GetModuleHandleA o_K32_GetModuleHandleA = nullptr;
+    inline static Kernel32Proxy::PFN_GetModuleHandleW o_K32_GetModuleHandleW = nullptr;
+    inline static Kernel32Proxy::PFN_GetModuleHandleExA o_K32_GetModuleHandleExA = nullptr;
     inline static Kernel32Proxy::PFN_GetModuleHandleExW o_K32_GetModuleHandleExW = nullptr;
     inline static Kernel32Proxy::PFN_GetFileAttributesW o_K32_GetFileAttributesW = nullptr;
     inline static Kernel32Proxy::PFN_CreateFileW o_K32_CreateFileW = nullptr;
@@ -41,10 +43,10 @@ class KernelHooks
     inline static KernelBaseProxy::PFN_LoadLibraryExW o_KB_LoadLibraryExW = nullptr;
     inline static KernelBaseProxy::PFN_GetProcAddress o_KB_GetProcAddress = nullptr;
 
-    static constexpr HMODULE amdxc64Mark = HMODULE(0xFFFFFFFF13372137);
-
     static FARPROC WINAPI hk_K32_GetProcAddress(HMODULE hModule, LPCSTR lpProcName);
     static HMODULE WINAPI hk_K32_GetModuleHandleA(LPCSTR lpModuleName);
+    static HMODULE WINAPI hk_K32_GetModuleHandleW(LPCWSTR lpModuleName);
+    static BOOL WINAPI hk_K32_GetModuleHandleExA(DWORD dwFlags, LPCSTR lpModuleName, HMODULE* phModule);
     static BOOL WINAPI hk_K32_GetModuleHandleExW(DWORD dwFlags, LPCWSTR lpModuleName, HMODULE* phModule);
     static FARPROC WINAPI hk_KB_GetProcAddress(HMODULE hModule, LPCSTR lpProcName);
     static DWORD WINAPI hk_K32_GetFileAttributesW(LPCWSTR lpFileName);
@@ -65,6 +67,8 @@ class KernelHooks
     static inline std::mutex hookMutexBase;
 
   public:
+    static inline HMODULE amdxc64Mark = HMODULE(0xFFFFFFFF13372137);
+
     static void Hook()
     {
         std::lock_guard<std::mutex> lock(hookMutex32);
@@ -76,6 +80,14 @@ class KernelHooks
 
         if (o_K32_GetModuleHandleA == nullptr)
             o_K32_GetModuleHandleA = Kernel32Proxy::Hook_GetModuleHandleA(hk_K32_GetModuleHandleA);
+
+        if (o_K32_GetModuleHandleW == nullptr)
+            o_K32_GetModuleHandleW = Kernel32Proxy::Hook_GetModuleHandleW(hk_K32_GetModuleHandleW);
+
+#ifdef LOW_LATENCY_INPUTS
+        if (o_K32_GetModuleHandleExA == nullptr)
+            o_K32_GetModuleHandleExA = Kernel32Proxy::Hook_GetModuleHandleExA(hk_K32_GetModuleHandleExA);
+#endif
 
         if (o_K32_GetModuleHandleExW == nullptr)
             o_K32_GetModuleHandleExW = Kernel32Proxy::Hook_GetModuleHandleExW(hk_K32_GetModuleHandleExW);

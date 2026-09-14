@@ -129,7 +129,7 @@ xess_result_t hk_xessVKCreateContext(VkInstance instance, VkPhysicalDevice physi
     _physicalDevice = physicalDevice;
     _device = device;
 
-    if (!State::Instance().NvngxVkInited)
+    if (!State::Instance().nvngxVkInited)
     {
         NVSDK_NGX_FeatureCommonInfo fcInfo {};
         auto exePath = Util::ExePath().remove_filename();
@@ -327,7 +327,7 @@ xess_result_t hk_xessVKExecute(xess_context_handle_t hContext, VkCommandBuffer c
     params->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_SubrectBase_Y,
                 pExecParams->inputResponsiveMaskBase.y);
 
-    State::Instance().setInputApiName = "XeSS";
+    State::Instance().setInputApiName = ApiUpscalerInput::XeSS_VK;
 
     if (NVSDK_NGX_VULKAN_EvaluateFeature(commandBuffer, handle, params, nullptr) == NVSDK_NGX_Result_Success)
         return XESS_RESULT_SUCCESS;
@@ -370,8 +370,6 @@ xess_result_t hk_xessVKGetRequiredInstanceExtensions(uint32_t* instanceExtension
 {
     LOG_FUNC();
 
-    ScopedSkipSpoofing skipSpoofing {};
-
     auto result =
         XeSSProxy::VKGetRequiredInstanceExtensions()(instanceExtensionsCount, instanceExtensions, minVkApiVersion);
 
@@ -384,7 +382,7 @@ xess_result_t hk_xessVKGetRequiredDeviceExtensions(VkInstance instance, VkPhysic
 {
     LOG_FUNC();
 
-    ScopedSkipSpoofing skipSpoofing {};
+    ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
 
     auto result =
         XeSSProxy::VKGetRequiredDeviceExtensions()(instance, physicalDevice, deviceExtensionsCount, deviceExtensions);
@@ -396,7 +394,7 @@ xess_result_t hk_xessVKGetRequiredDeviceFeatures(VkInstance instance, VkPhysical
 {
     LOG_FUNC();
 
-    ScopedSkipSpoofing skipSpoofing {};
+    ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
 
     auto result = XeSSProxy::VKGetRequiredDeviceFeatures()(instance, physicalDevice, features);
 

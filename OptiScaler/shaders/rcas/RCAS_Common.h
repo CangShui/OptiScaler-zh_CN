@@ -6,8 +6,6 @@
 #include "shaders/DA_RCAS_Shader.h"
 #include "shaders/RCAS_Shader.h"
 
-#include <d3dcompiler.h>
-
 struct RcasConstants
 {
     float Sharpness;
@@ -17,34 +15,76 @@ struct RcasConstants
 
     float CameraNear;
     float CameraFar;
+
+    bool DepthIsLinear;
+    bool DepthIsReversed;
+
+    bool IsHdr;
 };
 
-static ID3DBlob* RCAS_CompileShader(const char* shaderCode, const char* entryPoint, const char* target)
+class RCAS_Common
 {
-    ID3DBlob* shaderBlob = nullptr;
-    ID3DBlob* errorBlob = nullptr;
-
-    HRESULT hr = D3DCompile(shaderCode, strlen(shaderCode), nullptr, nullptr, nullptr, entryPoint, target,
-                            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &shaderBlob, &errorBlob);
-
-    if (FAILED(hr))
+  protected:
+    struct alignas(256) InternalConstants
     {
-        LOG_ERROR("error while compiling shader");
+        float Sharpness;
+        float Contrast;
 
-        if (errorBlob)
-        {
-            LOG_ERROR("error while compiling shader : {0}", (char*) errorBlob->GetBufferPointer());
-            errorBlob->Release();
-        }
+        // Motion Vector Stuff
+        int DynamicSharpenEnabled;
+        int DisplaySizeMV;
+        int Debug;
+        int MotionWidth;
+        int MotionHeight;
 
-        if (shaderBlob)
-            shaderBlob->Release();
+        float MotionSharpness;
+        float MotionTextureScale;
+        float MvScaleX;
+        float MvScaleY;
+        float Threshold;
+        float ScaleLimit;
 
-        return nullptr;
-    }
+        int OutputWidth;
+        int OutputHeight;
+    };
 
-    if (errorBlob)
-        errorBlob->Release();
+    struct alignas(256) InternalConstantsDA
+    {
+        float Sharpness;
 
-    return shaderBlob;
-}
+        int DepthIsLinear;
+        int DepthIsReversed;
+
+        float DepthScale;
+        float DepthBias;
+
+        float DepthLinearA;
+        float DepthLinearB;
+        float DepthLinearC;
+
+        int DynamicSharpenEnabled;
+        int DisplaySizeMV;
+        int Debug;
+
+        float MotionSharpness;
+        float MotionTextureScale;
+        float MvScaleX;
+        float MvScaleY;
+        float MotionThreshold;
+        float MotionScaleLimit;
+
+        float DepthTextureScale;
+
+        int ClampOutput;
+
+        int OutputWidth;
+        int OutputHeight;
+        int MotionWidth;
+        int MotionHeight;
+        int DepthWidth;
+        int DepthHeight;
+    };
+
+    void FillMotionConstants(InternalConstants& OutConstants, const RcasConstants& InConstants);
+    void FillMotionConstants(InternalConstantsDA& OutConstants, const RcasConstants& InConstants);
+};

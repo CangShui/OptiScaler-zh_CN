@@ -1,84 +1,189 @@
 #include "pch.h"
-#include "fakenvapi.h"
+
 #include "proxies/FfxApi_Proxy.h"
+#include <unordered_map>
 
-void fakenvapi::Init(PFN_NvApi_QueryInterface& queryInterface)
+#include "fakenvapi.h"
+#include "NvApiTypes.h"
+#include "fakenvapi/nvapi_calls.h"
+
+#define nvapi_interface_table nvapi_interface_table_extern
+#include <nvapi_interface.h>
+#undef nvapi_interface_table
+
+std::unordered_map<NvU32, void*> fakenvapi::idToFuncMapping;
+
+void fakenvapi::init(bool onlyContext)
 {
-    if (_inited)
+    LowLatencyCtx::init();
+
+    if (onlyContext)
         return;
+}
 
-    LOG_DEBUG("Trying to get fakenvapi-specific functions");
+void fakenvapi::deinit()
+{
+    LowLatencyCtx::get()->deinit_current_tech();
+    LowLatencyCtx::shutdown();
+}
 
-    Fake_InformFGState = static_cast<decltype(Fake_InformFGState)>(queryInterface(GET_ID(Fake_InformFGState)));
-    Fake_InformPresentFG = static_cast<decltype(Fake_InformPresentFG)>(queryInterface(GET_ID(Fake_InformPresentFG)));
-    Fake_GetAntiLagCtx = static_cast<decltype(Fake_GetAntiLagCtx)>(queryInterface(GET_ID(Fake_GetAntiLagCtx)));
-    Fake_GetLowLatencyCtx = static_cast<decltype(Fake_GetLowLatencyCtx)>(queryInterface(GET_ID(Fake_GetLowLatencyCtx)));
-    Fake_SetLowLatencyCtx = static_cast<decltype(Fake_SetLowLatencyCtx)>(queryInterface(GET_ID(Fake_SetLowLatencyCtx)));
+// names from: https://github.com/SveSop/nvapi_standalone/blob/master/dlls/nvapi/nvapi.c
+static NVAPI_INTERFACE_TABLE additional_interface_table[] = { { "NvAPI_Diag_ReportCallStart", 0x33c7358c },
+                                                              { "NvAPI_Diag_ReportCallReturn", 0x593e8644 },
+                                                              { "NvAPI_Unknown_1", 0xe9b009b9 },
+                                                              { "NvAPI_SK_1", 0x57f7caac },
+                                                              { "NvAPI_SK_2", 0x11104158 },
+                                                              { "NvAPI_SK_3", 0xe3795199 },
+                                                              { "NvAPI_SK_4", 0xdf0dfcdd },
+                                                              { "NvAPI_SK_5", 0x932ac8fb } };
 
-    if (Fake_InformFGState != nullptr)
-        LOG_DEBUG("Got InformFGState");
+extern "C" __declspec(dllexport) void* nvapi_QueryInterface(NvU32 id) { return fakenvapi::queryInterface(id); }
 
-    if (Fake_InformPresentFG != nullptr)
-        LOG_DEBUG("Got InformPresentFG");
+void* __cdecl fakenvapi::queryInterface(NvU32 id)
+{
+    auto entry = idToFuncMapping.find(id);
+    if (entry != idToFuncMapping.end())
+        return entry->second;
 
-    if (Fake_GetAntiLagCtx != nullptr)
-        LOG_DEBUG("Got GetAntiLagCtx");
+    constexpr auto original_size = sizeof(nvapi_interface_table_extern) / sizeof(nvapi_interface_table_extern[0]);
+    constexpr auto additional_size = sizeof(additional_interface_table) / sizeof(additional_interface_table[0]);
 
-    if (Fake_GetLowLatencyCtx != nullptr)
-        LOG_DEBUG("Got GetLowLatencyCtx");
+    constexpr auto total_size = original_size + additional_size;
 
-    if (Fake_SetLowLatencyCtx != nullptr)
-        LOG_DEBUG("Got SetLowLatencyCtx");
+    struct NVAPI_INTERFACE_TABLE extended_interface_table[total_size] {};
+    memcpy(extended_interface_table, nvapi_interface_table_extern,
+           sizeof(nvapi_interface_table_extern)); // copy original table
 
-    _inited = Fake_InformFGState || Fake_InformPresentFG;
+    for (unsigned int i = 0; i < additional_size; i++)
+    {
+        extended_interface_table[original_size + i] = additional_interface_table[i];
+    }
 
-    if (_inited)
-        LOG_INFO("fakenvapi initialized successfully");
-    else
-        LOG_INFO("Failed to initialize fakenvapi");
+    auto it = std::find_if(std::begin(extended_interface_table), std::end(extended_interface_table),
+                           [id](const auto& item) { return item.id == id; });
+
+    if (it == std::end(extended_interface_table))
+    {
+        LOG_DEBUG("NvAPI_QueryInterface (0x{:x}): Unknown interface ID", id);
+        return idToFuncMapping.insert({ id, nullptr }).first->second;
+    }
+
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Initialize)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GetInterfaceVersionString)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_EnumNvidiaDisplayHandle)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GetLogicalGPUFromPhysicalGPU)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_EnumPhysicalGPUs)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_EnumLogicalGPUs)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GetGPUIDfromPhysicalGPU)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GetPhysicalGPUFromGPUID)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GetPhysicalGPUsFromDisplay)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GetPhysicalGPUsFromLogicalGPU)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GetErrorMessage)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GetDisplayDriverVersion)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_GetLogicalGpuInfo)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_GetConnectedDisplayIds)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_CudaEnumComputeCapableGpus)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_GetArchInfo)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_GetPCIIdentifiers)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_GetFullName)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_GetGpuCoreCount)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_GetAllClockFrequencies)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_GetAdapterIdFromPhysicalGpu)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_GPU_GetPstates20)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_DISP_GetDisplayIdByDisplayName)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_DISP_GetGDIPrimaryDisplayId)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Disp_SetOutputMode)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Disp_GetOutputMode)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Disp_GetHdrCapabilities)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Disp_HdrColorControl)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Mosaic_GetDisplayViewportsByResolution)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_SYS_GetDisplayDriverInfo)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_SYS_GetDriverAndBranchVersion)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_SYS_GetDisplayIdFromGpuAndOutputId)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_SYS_GetGpuAndOutputIdFromDisplayId)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D_SetResourceHint)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D_GetObjectHandleForResource)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D_GetSleepStatus)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D_GetLatency)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D_SetSleepMode)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D_SetLatencyMarker)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D_Sleep)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D_SetReflexSync)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D11_IsNvShaderExtnOpCodeSupported)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D11_BeginUAVOverlap)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D11_EndUAVOverlap)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D11_SetDepthBoundsTest)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D12_GetRaytracingCaps)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D12_IsNvShaderExtnOpCodeSupported)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D12_SetNvShaderExtnSlotSpaceLocalThread)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D12_GetRaytracingAccelerationStructurePrebuildInfoEx)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D12_BuildRaytracingAccelerationStructureEx)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D12_NotifyOutOfBandCommandQueue)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_D3D12_SetAsyncFrameMarker)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Vulkan_InitLowLatencyDevice)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Vulkan_DestroyLowLatencyDevice)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Vulkan_GetSleepStatus)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Vulkan_SetSleepMode)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Vulkan_Sleep)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Vulkan_GetLatency)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Vulkan_SetLatencyMarker)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Vulkan_NotifyOutOfBandVkQueue)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_DRS_CreateSession)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_DRS_LoadSettings)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_DRS_SaveSettings)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_DRS_GetBaseProfile)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_DRS_GetSetting)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_DRS_SetSetting)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_DRS_DestroySession)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_NGX_GetDriverFeatureSupport)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Unknown_1)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_SK_1)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_SK_2)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_SK_3)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_SK_4)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_SK_5)
+    INSERT_AND_RETURN_WHEN_EQUALS(NvAPI_Unload)
+
+    LOG_DEBUG("{}: not implemented, placeholder given", it->func);
+    return idToFuncMapping.insert({ id, (void*) placeholder }).first->second;
+    // return registry.insert({ id, nullptr }).first->second;
 }
 
 // Inform AntiLag 2 when present of interpolated frames starts
 void fakenvapi::reportFGPresent(IDXGISwapChain* pSwapChain, bool fg_state, bool frame_interpolated)
 {
-    if (!isUsingFakenvapi())
+    if (!isUsingAsMainNvapi() || State::Instance().activeFgOutput != FGOutput::FSRFG)
         return;
 
+    auto lowLatencyCtx = LowLatencyCtx::get();
+
     // Lets fakenvapi log and reset correctly
-    Fake_InformFGState(fg_state);
+    if (lowLatencyCtx)
+        lowLatencyCtx->set_forced_fg(fg_state);
+    else
+        LOG_ERROR("Couldn't get low latency context");
 
     if (fg_state)
     {
-        if (State::Instance().activeFgOutput == FGOutput::FSRFG)
+        // Starting with FSR 3.1.1 we can provide an AntiLag 2 context to FSR FG
+        // and it will call SetFrameGenFrameType for us
+        auto static ffxApiVersion = FfxApiProxy::VersionDx12();
+        constexpr feature_version requiredVersion = { 3, 1, 1 };
+        if (ffxApiVersion >= requiredVersion && updateModeAndContext())
         {
-            // Starting with FSR 3.1.1 we can provide an AntiLag 2 context to FSR FG
-            // and it will call SetFrameGenFrameType for us
-            auto static ffxApiVersion = FfxApiProxy::VersionDx12();
-            constexpr feature_version requiredVersion = { 3, 1, 1 };
-            if (ffxApiVersion >= requiredVersion && updateModeAndContext())
-            {
-                antilag2_data.enabled = _lowLatencyContext != nullptr && _lowLatencyMode == Mode::AntiLag2;
-                antilag2_data.context = antilag2_data.enabled ? _lowLatencyContext : nullptr;
+            antilag2_data.enabled = _lowLatencyTechContext != nullptr && _lowLatencyMode == LowLatencyMode::AntiLag2;
+            antilag2_data.context = antilag2_data.enabled ? _lowLatencyTechContext : nullptr;
 
-                pSwapChain->SetPrivateData(IID_IFfxAntiLag2Data, sizeof(antilag2_data), &antilag2_data);
-            }
-            else
-            {
-                // Tell fakenvapi to call SetFrameGenFrameType by itself
-                // Reflex frame id might get used in the future
-                LOG_TRACE("Fake_InformPresentFG: {}", frame_interpolated);
-                Fake_InformPresentFG(frame_interpolated, 0);
-            }
+            pSwapChain->SetPrivateData(IID_IFfxAntiLag2Data, sizeof(antilag2_data), &antilag2_data);
         }
-        else if (State::Instance().activeFgOutput == FGOutput::XeFG)
+        else
         {
-            if (updateModeAndContext())
-            {
-                // Tell fakenvapi to call SetFrameGenFrameType by itself
-                // Reflex frame id might get used in the future
-                LOG_TRACE("Fake_InformPresentFG: {}", frame_interpolated);
-                Fake_InformPresentFG(frame_interpolated, 0);
-            }
+            // Tell fakenvapi to call SetFrameGenFrameType by itself
+            // Reflex frame id might get used in the future
+            LOG_TRACE("Fake_InformPresentFG: {}", frame_interpolated);
+
+            if (lowLatencyCtx)
+                lowLatencyCtx->set_fg_type(frame_interpolated, 0);
         }
     }
     else
@@ -90,131 +195,81 @@ void fakenvapi::reportFGPresent(IDXGISwapChain* pSwapChain, bool fg_state, bool 
 
 bool fakenvapi::updateModeAndContext()
 {
-    if (!isUsingFakenvapi() && State::Instance().activeFgOutput == FGOutput::XeFG &&
-        !Config::Instance()->DontUseFakenvapiForXeLLOnNvidia.value_or_default())
-    {
-        auto loaded = fakenvapi::loadForNvidia();
-    }
-
-    if (!isUsingFakenvapi() && !isUsingFakenvapiOnNvidia())
-        return false;
-
     LOG_FUNC();
 
-    if (Fake_GetLowLatencyCtx)
+    auto lowLatencyCtx = LowLatencyCtx::get();
+
+    if (!lowLatencyCtx)
     {
-        auto result = Fake_GetLowLatencyCtx(&_lowLatencyContext, &_lowLatencyMode);
+        // Real reflex should fall here and not log
+        if (_usingFakenvapiAsMainNvapi)
+            LOG_ERROR("Couldn't get low latency context");
 
-        if (result != NVAPI_OK)
-            LOG_ERROR("Can't get Low Latency context from fakenvapi");
-
-        return result == NVAPI_OK;
+        return false;
     }
 
-    // fallback for older fakenvapi builds
-    if (Fake_GetAntiLagCtx)
-    {
-        auto result = Fake_GetAntiLagCtx(&_lowLatencyContext);
+    auto result = lowLatencyCtx->get_low_latency_tech_context(&_lowLatencyTechContext, &_lowLatencyMode);
 
-        if (result != NVAPI_OK)
-            _lowLatencyMode = Mode::LatencyFlex;
-        else
-            _lowLatencyMode = Mode::AntiLag2;
+    if (!result)
+        LOG_TRACE_FAKENVAPI("Can't get Low Latency context from fakenvapi");
 
-        return result == NVAPI_OK;
-    }
-
-    _lowLatencyContext = nullptr;
-    _lowLatencyMode = Mode::LatencyFlex;
-
-    return false;
+    return result;
 }
 
-bool fakenvapi::setModeAndContext(void* context, Mode mode)
+bool fakenvapi::forceMode(IUnknown* device, LowLatencyMode mode)
 {
-    if (!isUsingFakenvapi() && State::Instance().activeFgOutput == FGOutput::XeFG &&
-        !Config::Instance()->DontUseFakenvapiForXeLLOnNvidia.value_or_default())
-    {
-        auto loaded = fakenvapi::loadForNvidia();
-    }
-
-    if (!isUsingFakenvapi() && !isUsingFakenvapiOnNvidia())
-        return false;
-
     LOG_FUNC();
 
-    if (Fake_SetLowLatencyCtx)
+    // Force init here, in case Reflex is not supported
+    LowLatencyCtx::init();
+
+    auto lowLatencyCtx = LowLatencyCtx::get();
+
+    if (!lowLatencyCtx)
     {
-        auto result = Fake_SetLowLatencyCtx(context, mode);
-
-        if (result != NVAPI_OK)
-            LOG_ERROR("Can't set Low Latency context from fakenvapi");
-
-        return result == NVAPI_OK;
+        LOG_ERROR("Couldn't get low latency context");
+        return false;
     }
 
-    return false;
+    auto result = lowLatencyCtx->set_low_latency_tech_mode(device, mode);
+
+    if (!result)
+        LOG_TRACE_FAKENVAPI("Can't set Low Latency context from fakenvapi");
+
+    return result;
 }
 
-bool fakenvapi::loadForNvidia()
+bool fakenvapi::isLowLatencyActive()
 {
-    if (!State::Instance().isRunningOnNvidia)
-        return false;
+    auto lowLatencyCtx = LowLatencyCtx::get();
 
-    if (_dllForNvidia != nullptr)
-        return true;
-
-    HMODULE memModule = nullptr;
-    auto optiPath = Config::Instance()->MainDllPath.value();
-    Util::LoadProxyLibrary(L"fakenvapi.dll", optiPath, Config::Instance()->NvapiDllPath.value_or(L""), &memModule,
-                           &_dllForNvidia);
-
-    if (memModule != nullptr)
+    if (!lowLatencyCtx)
     {
-        if (_dllForNvidia == nullptr)
-            _dllForNvidia = memModule;
-        else if (memModule != _dllForNvidia)
-            LOG_WARN("Loaded fakenvapi.dll from memory but it is different from Opti folder");
-    }
+        if (_usingFakenvapiAsMainNvapi)
+            LOG_ERROR("Couldn't get low latency context");
 
-    if (!_dllForNvidia)
-        return false;
-
-    auto queryInterface =
-        (PFN_NvApi_QueryInterface) KernelBaseProxy::GetProcAddress_()(_dllForNvidia, "nvapi_QueryInterface");
-
-    if (queryInterface == nullptr)
-    {
-        _dllForNvidia = nullptr;
         return false;
     }
 
-    ForNvidia_SetSleepMode = GET_INTERFACE(NvAPI_D3D_SetSleepMode, queryInterface);
-    ForNvidia_Sleep = GET_INTERFACE(NvAPI_D3D_Sleep, queryInterface);
-    ForNvidia_GetLatency = GET_INTERFACE(NvAPI_D3D_GetLatency, queryInterface);
-    ForNvidia_SetLatencyMarker = GET_INTERFACE(NvAPI_D3D_SetLatencyMarker, queryInterface);
-    ForNvidia_SetAsyncFrameMarker = GET_INTERFACE(NvAPI_D3D12_SetAsyncFrameMarker, queryInterface);
-
-    Fake_InformFGState = static_cast<decltype(Fake_InformFGState)>(queryInterface(GET_ID(Fake_InformFGState)));
-    Fake_InformPresentFG = static_cast<decltype(Fake_InformPresentFG)>(queryInterface(GET_ID(Fake_InformPresentFG)));
-    Fake_GetAntiLagCtx = static_cast<decltype(Fake_GetAntiLagCtx)>(queryInterface(GET_ID(Fake_GetAntiLagCtx)));
-    Fake_GetLowLatencyCtx = static_cast<decltype(Fake_GetLowLatencyCtx)>(queryInterface(GET_ID(Fake_GetLowLatencyCtx)));
-    Fake_SetLowLatencyCtx = static_cast<decltype(Fake_SetLowLatencyCtx)>(queryInterface(GET_ID(Fake_SetLowLatencyCtx)));
-
-    if (Fake_SetLowLatencyCtx)
-    {
-        _initedForNvidia = true;
-        LOG_INFO("fakenvapi initialized for Nvidia");
-        return true;
-    }
-
-    LOG_INFO("Failed to initialize fakenvapi for Nvidia");
-    return false;
+    return lowLatencyCtx->is_low_latency_enabled();
 }
 
-// updateModeAndContext needs to be called before that
-Mode fakenvapi::getCurrentMode() { return _lowLatencyMode; }
+LowLatencyMode fakenvapi::getCurrentMode()
+{
+    if (updateModeAndContext())
+        return _lowLatencyMode;
+    else
+        return LowLatencyMode::None;
+}
 
-bool fakenvapi::isUsingFakenvapi() { return _inited; }
+void* fakenvapi::getCurrentContext()
+{
+    if (updateModeAndContext())
+        return _lowLatencyTechContext;
+    else
+        return nullptr;
+}
 
-bool fakenvapi::isUsingFakenvapiOnNvidia() { return _initedForNvidia; }
+bool fakenvapi::isUsingAsMainNvapi() { return _usingFakenvapiAsMainNvapi; }
+
+void fakenvapi::setUsingAsMainNvapi(bool usingAsMain) { _usingFakenvapiAsMainNvapi = usingAsMain; }

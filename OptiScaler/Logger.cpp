@@ -114,29 +114,8 @@ void PrepareLogger()
 
             if (Config::Instance()->LogToFile.value_or_default())
             {
-                auto logPath = std::filesystem::path(Config::Instance()->LogFileName.value_or_default());
-
-                // if just a filename is provided, log to the executable directory
-                if (!logPath.has_parent_path() && !logPath.is_absolute())
-                {
-                    // if LogFileName is just a filename, use it with the executable directory
-                    if (logPath.has_filename())
-                        logPath = Util::ExePath().parent_path() / Config::Instance()->LogFileName.value_or_default();
-                    else
-                        logPath = Util::ExePath().parent_path() / L"OptiScaler.log";
-                }
-                else
-                {
-                    // if LogFileName is just a directory
-                    if (std::filesystem::is_directory(logPath))
-                        logPath = logPath / L"OptiScaler.log";
-
-                    // if the parent folder doesn't exist, log to the executable directory instead
-                    if (!std::filesystem::is_directory(logPath.parent_path()))
-                        logPath = Util::ExePath().parent_path() / L"OptiScaler.log";
-                }
-
-                auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(logPath, true);
+                auto file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(
+                    Config::Instance()->LogFileName.value_or_default(), true);
                 file_sink->set_level(spdlog::level::level_enum::trace);
 #ifdef LOG_ASYNC
                 file_sink->set_pattern("%H:%M:%S.%f\t%L\t%v");

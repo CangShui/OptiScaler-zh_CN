@@ -24,8 +24,7 @@ class DI_Dx12 : public Shader_Dx12
     bool CreateBufferResource(ID3D12Device* InDevice, ID3D12Resource* InSource, uint64_t InWidth, uint32_t InHeight,
                               D3D12_RESOURCE_STATES InState);
     void SetBufferState(ID3D12GraphicsCommandList* InCommandList, D3D12_RESOURCE_STATES InState);
-    bool Dispatch(ID3D12Device* InDevice, ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InResource,
-                  ID3D12Resource* OutResource);
+    bool Dispatch(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InResource, ID3D12Resource* OutResource);
 
     ID3D12Resource* Buffer() { return _buffer; }
     bool CanRender() const { return _init && _buffer != nullptr; }

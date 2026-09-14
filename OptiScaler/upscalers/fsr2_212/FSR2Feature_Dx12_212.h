@@ -18,12 +18,13 @@ class FSR2FeatureDx12_212 : public FSR2Feature212, public IFeature_Dx12
     {
     }
 
-    bool Init(ID3D12Device* InDevice, ID3D12GraphicsCommandList* InCommandList,
-              NVSDK_NGX_Parameter* InParameters) override;
-    bool Evaluate(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters) override;
+    bool InitInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters) override;
+    bool EvaluateInternal(ID3D12GraphicsCommandList* InCommandList, NVSDK_NGX_Parameter* InParameters) override;
 
     feature_version Version() override { return FSR2Feature212::Version(); }
-    std::string Name() const override { return FSR2Feature212::Name(); }
+    Upscaler GetUpscalerType() const final { return Upscaler::FSR21; }
+    API Api() const override { return IFeature_Dx12::Api(); }
+    bool CallsUpscalerEndByItself() override { return IFeature_Dx12::CallsUpscalerEndByItself(); }
 
     bool IsWithDx12() override { return false; }
 

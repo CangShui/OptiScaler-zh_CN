@@ -8,10 +8,10 @@ void Sl_Inputs_Dx12::CheckForFrame(IFGFeature_Dx12* fg, uint32_t frameId)
 {
     std::scoped_lock lock(_frameBoundaryMutex);
 
-    if (_isFrameFinished && _lastFrameId == _currentFrameId && frameId == 0 && frameId != _currentFrameId)
+    if (_isFrameFinished && _lastPresentFrameId == _currentFrameId && frameId == 0 && frameId != _currentFrameId)
     {
-        LOG_DEBUG("1> CheckForFrame: frameId={}, currentFrameId={}, lastFrameId={}, isFrameFinished={}", frameId,
-                  _currentFrameId, _lastFrameId, _isFrameFinished);
+        LOG_DEBUG("1> CheckForFrame: frameId={}, currentFrameId={}, lastPresentFrameId={}, isFrameFinished={}", frameId,
+                  _currentFrameId, _lastPresentFrameId, _isFrameFinished);
 
         _isFrameFinished = false;
 
@@ -21,17 +21,17 @@ void Sl_Inputs_Dx12::CheckForFrame(IFGFeature_Dx12* fg, uint32_t frameId)
         if (frameId != 0)
             _currentFrameId = frameId;
         else
-            _currentFrameId = _lastFrameId + 1;
+            _currentFrameId = _lastPresentFrameId + 1;
 
         _frameIdIndex[_currentIndex] = _currentFrameId;
     }
     else if (frameId != 0 && frameId > _currentFrameId)
     {
-        LOG_DEBUG("2> CheckForFrame: frameId={}, currentFrameId={}, lastFrameId={}, isFrameFinished={}", frameId,
-                  _currentFrameId, _lastFrameId, _isFrameFinished);
+        LOG_DEBUG("2> CheckForFrame: frameId={}, currentFrameId={}, lastPresentFrameId={}, isFrameFinished={}", frameId,
+                  _currentFrameId, _lastPresentFrameId, _isFrameFinished);
 
         _isFrameFinished = false;
-        _lastFrameId = frameId - 1;
+        //_lastPresentFrameId = frameId - 1;
 
         fg->StartNewFrame();
         _currentIndex = fg->GetIndex();
@@ -53,7 +53,7 @@ int Sl_Inputs_Dx12::IndexForFrameId(uint32_t frameId) const
 
 bool Sl_Inputs_Dx12::setConstants(const sl::Constants& values, uint32_t frameId)
 {
-    auto fgOutput = reinterpret_cast<IFGFeature_Dx12*>(State::Instance().currentFG);
+    auto fgOutput = State::Instance().currentFG;
 
     if (fgOutput == nullptr)
         return false;
@@ -249,9 +249,9 @@ bool Sl_Inputs_Dx12::setConstants(const sl::Constants& values, uint32_t frameId)
     return dataFound;
 }
 
-bool Sl_Inputs_Dx12::evaluateState(ID3D12Device* device)
+bool Sl_Inputs_Dx12::evaluateState()
 {
-    auto fgOutput = reinterpret_cast<IFGFeature_Dx12*>(State::Instance().currentFG);
+    auto fgOutput = State::Instance().currentFG;
 
     if (fgOutput == nullptr)
         return false;
@@ -273,7 +273,7 @@ bool Sl_Inputs_Dx12::evaluateState(ID3D12Device* device)
     if (repeatsInRow > 10 && fgOutput->IsActive())
     {
         LOG_WARN("Many frame count repeats in a row, stopping FG");
-        State::Instance().FGchanged = true;
+        State::Instance().fgChanged = true;
         repeatsInRow = 0;
         return false;
     }
@@ -284,7 +284,7 @@ bool Sl_Inputs_Dx12::evaluateState(ID3D12Device* device)
 bool Sl_Inputs_Dx12::reportResource(const sl::ResourceTag& tag, ID3D12GraphicsCommandList* cmdBuffer, uint32_t frameId)
 {
     auto& state = State::Instance();
-    state.DLSSGLastFrame = state.FGLastFrame;
+    state.dlssgLastFrame = state.fgLastFrame;
 
     auto fgOutput = reinterpret_cast<IFGFeature_Dx12*>(state.currentFG);
 
@@ -450,7 +450,7 @@ void Sl_Inputs_Dx12::markPresent(uint64_t frameId)
     std::scoped_lock lock(_frameBoundaryMutex);
     LOG_TRACE("frameId: {}", frameId);
     _isFrameFinished = true;
-    _lastFrameId = static_cast<uint32_t>(frameId);
+    _lastPresentFrameId = static_cast<uint32_t>(frameId);
 
     if (State::Instance().currentFG != nullptr)
         State::Instance().currentFG->SetFrameCount(frameId);

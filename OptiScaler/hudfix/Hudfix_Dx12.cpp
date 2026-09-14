@@ -164,6 +164,8 @@ bool Hudfix_Dx12::CreateBufferResource(ID3D12Device* InDevice, ResourceInfo* InS
         if (bufDesc.Width != (UINT64) (InSource->width) || bufDesc.Height != (UINT) (InSource->height) ||
             bufDesc.Format != InSource->format)
         {
+            // Maybe need to add a fence here
+            // To be sure it's not used anymore
             (*OutResource)->Release();
             (*OutResource) = nullptr;
             LOG_WARN("Release {}x{}, new one: {}x{}", bufDesc.Width, bufDesc.Height, InSource->width, InSource->height);
@@ -338,7 +340,7 @@ bool Hudfix_Dx12::CheckResource(ResourceInfo* resource)
         return false;
     }
 
-    if (State::Instance().FGonlyUseCapturedResources)
+    if (State::Instance().fgOnlyUseCapturedResources)
     {
         auto result = _captureList.find(resource->buffer) != _captureList.end();
         return result;
@@ -458,46 +460,22 @@ void Hudfix_Dx12::HudlessFound(ID3D12GraphicsCommandList* cmdList)
     _skipHudlessChecks = false;
 }
 
-bool Hudfix_Dx12::CheckForRealObject(std::string functionName, IUnknown* pObject, IUnknown** ppRealObject)
-{
-    // return false;
-
-    if (streamlineRiid.Data1 == 0)
-    {
-        auto iidResult = IIDFromString(L"{ADEC44E2-61F0-45C3-AD9F-1B37379284FF}", &streamlineRiid);
-
-        if (iidResult != S_OK)
-            return false;
-    }
-
-    auto qResult = pObject->QueryInterface(streamlineRiid, (void**) ppRealObject);
-
-    if (qResult == S_OK && *ppRealObject != nullptr)
-    {
-        LOG_INFO("{} Streamline proxy found!", functionName);
-        (*ppRealObject)->Release();
-        return true;
-    }
-
-    return false;
-}
-
 void Hudfix_Dx12::UpscaleStart()
 {
-    if (State::Instance().FGresetCapturedResources)
+    if (State::Instance().fgResetCapturedResources)
     {
         std::lock_guard<std::mutex> lock(_captureMutex);
         _captureList.clear();
         LOG_DEBUG("FGResetCapturedResources");
-        State::Instance().FGcapturedResourceCount = 0;
-        State::Instance().FGresetCapturedResources = false;
+        State::Instance().fgCapturedResourceCount = 0;
+        State::Instance().fgResetCapturedResources = false;
     }
 
-    if (State::Instance().ClearCapturedHudlesses)
+    if (State::Instance().clearCapturedHudlesses)
     {
         LOG_DEBUG("ClearCapturedHudlesses");
-        State::Instance().ClearCapturedHudlesses = false;
-        State::Instance().CapturedHudlesses.clear();
+        State::Instance().clearCapturedHudlesses = false;
+        State::Instance().capturedHudlesses.clear();
     }
 }
 
@@ -555,9 +533,9 @@ bool Hudfix_Dx12::IsResourceCheckActive()
         return false;
     }
 
-    if (!State::Instance().currentFG->IsActive() || State::Instance().FGchanged)
+    if (!State::Instance().currentFG->IsActive() || State::Instance().fgChanged)
     {
-        // LOG_TRACK("!State::Instance().currentFG->IsActive() || State::Instance().FGchanged");
+        // LOG_TRACK("!State::Instance().currentFG->IsActive() || State::Instance().fgChanged");
         return false;
     }
 
@@ -586,8 +564,8 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
         }
 
         CapturedHudlessInfo* capturedHudlessInfo = nullptr;
-        auto it = s.CapturedHudlesses.find(resource->buffer);
-        if (it != s.CapturedHudlesses.end())
+        auto it = s.capturedHudlesses.find(resource->buffer);
+        if (it != s.capturedHudlesses.end())
         {
             capturedHudlessInfo = &it->second;
 
@@ -840,8 +818,7 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
                 ResourceBarrier(fgCmdList, _captureBuffer[fIndex], D3D12_RESOURCE_STATE_COPY_DEST,
                                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
-                _formatTransfer[fIndex]->Dispatch(s.currentD3D12Device, fgCmdList, _captureBuffer[fIndex],
-                                                  _formatTransfer[fIndex]->Buffer());
+                _formatTransfer[fIndex]->Dispatch(fgCmdList, _captureBuffer[fIndex], _formatTransfer[fIndex]->Buffer());
 
                 ResourceBarrier(fgCmdList, _captureBuffer[fIndex], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                                 D3D12_RESOURCE_STATE_COPY_DEST);
@@ -896,11 +873,11 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
             }
         }
 
-        if (s.FGcaptureResources)
+        if (s.fgCaptureResources)
         {
             std::lock_guard<std::mutex> lock(_captureMutex);
             _captureList.insert(resource->buffer);
-            s.FGcapturedResourceCount = _captureList.size();
+            s.fgCapturedResourceCount = _captureList.size();
         }
 
         LOG_DEBUG("Calling FG with hudless");
@@ -919,7 +896,7 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
         }
         else
         {
-            s.CapturedHudlesses.insert_or_assign(resource->buffer,
+            s.capturedHudlesses.insert_or_assign(resource->buffer,
                                                  CapturedHudlessInfo { 1, resource->captureInfo, true });
 
             LOG_DEBUG("Inserted hudless info for {:X}", (size_t) resource->buffer);

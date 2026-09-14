@@ -69,23 +69,15 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
         }
 
         // First check state to prevent upscaler re-init loops
-        if (State::Instance().AutoExposure.has_value())
+        if (State::Instance().autoExposure.has_value())
         {
-            LOG_INFO("AutoExposure flag overrided by OptiScaler: {}", State::Instance().AutoExposure.value());
-            _initFlags.AutoExposure = State::Instance().AutoExposure.value();
+            LOG_INFO("AutoExposure flag overrided by OptiScaler: {}", State::Instance().autoExposure.value());
+            _initFlags.AutoExposure = State::Instance().autoExposure.value();
         }
         else if (Config::Instance()->AutoExposure.has_value())
         {
             LOG_INFO("AutoExposure flag overrided by user: {}", Config::Instance()->AutoExposure.value());
             _initFlags.AutoExposure = Config::Instance()->AutoExposure.value();
-        }
-        else if ((State::Instance().NVNGX_Engine == NVSDK_NGX_ENGINE_TYPE_UNREAL ||
-                  State::Instance().GameEngine == GameEngineType::Unreal ||
-                  State::Instance().gameQuirks & GameQuirk::ForceUnrealEngine) &&
-                 Name()[0] == 'X')
-        {
-            LOG_INFO("AutoExposure flag overrided by OptiScaler (UE+XeSS): true");
-            _initFlags.AutoExposure = true;
         }
         else
         {
@@ -178,7 +170,8 @@ bool IFeature::SetInitParameters(NVSDK_NGX_Parameter* InParameters)
     return false;
 }
 
-void IFeature::GetRenderResolution(NVSDK_NGX_Parameter* InParameters, unsigned int* OutWidth, unsigned int* OutHeight)
+void IFeature::GetRenderResolution(const NVSDK_NGX_Parameter* InParameters, unsigned int* OutWidth,
+                                   unsigned int* OutHeight)
 {
     if (InParameters->Get(NVSDK_NGX_Parameter_DLSS_Render_Subrect_Dimensions_Width, OutWidth) !=
             NVSDK_NGX_Result_Success ||

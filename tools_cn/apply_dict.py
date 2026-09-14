@@ -9,7 +9,7 @@ import json
 import re
 from pathlib import Path
 
-BASE = Path(r"C:\Users\Administrator\Desktop\test\OptiScaler")
+BASE = Path(__file__).resolve().parents[1]
 MENU = BASE / "OptiScaler" / "menu"
 DICT = json.loads(Path(BASE / "tools_cn" / "dict.json").read_text(encoding="utf-8"))
 assert all(v for v in DICT.values()), "empty translation value"

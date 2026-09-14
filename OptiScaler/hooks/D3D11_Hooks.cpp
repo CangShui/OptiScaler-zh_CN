@@ -135,18 +135,22 @@ static HRESULT hkD3D11On12CreateDevice(IUnknown* pDevice, UINT Flags, const D3D_
 
     bool rtss = false;
 
-    IUnknown* copyCommandQueues = *ppCommandQueues;
+    std::vector<IUnknown*> copyCommandQueues;
+
+    if (ppCommandQueues && NumQueues > 0)
+        copyCommandQueues.assign(ppCommandQueues, ppCommandQueues + NumQueues);
 
     // Assuming RTSS is creating a D3D11on12 device, not sure why but sometimes RTSS tries to create
     // it's D3D11on12 device with old CommandQueue which results crash
     // I am changing it's CommandQueue with current swapchain's command queue
-    if (State::Instance().currentCommandQueue != nullptr && *ppCommandQueues != State::Instance().currentCommandQueue &&
+    if (State::Instance().currentCommandQueue != nullptr &&
+        copyCommandQueues[0] != State::Instance().currentCommandQueue &&
         GetModuleHandle(L"RTSSHooks64.dll") != nullptr && pDevice == State::Instance().currentD3D12Device)
     {
         LOG_INFO("Replaced RTSS CommandQueue with correct one {0:X} -> {1:X}", (UINT64) *ppCommandQueues,
                  (UINT64) State::Instance().currentCommandQueue);
 
-        copyCommandQueues = State::Instance().currentCommandQueue;
+        copyCommandQueues[0] = State::Instance().currentCommandQueue;
 
         rtss = true;
     }
@@ -154,8 +158,9 @@ static HRESULT hkD3D11On12CreateDevice(IUnknown* pDevice, UINT Flags, const D3D_
     HRESULT result = E_FAIL;
     {
         ScopedCreatingD3DDevice skipCreatingD3DDevice {};
-        result = o_D3D11On12CreateDevice(pDevice, Flags, pFeatureLevels, FeatureLevels, &copyCommandQueues, NumQueues,
-                                         NodeMask, ppDevice, ppImmediateContext, pChosenFeatureLevel);
+        result = o_D3D11On12CreateDevice(pDevice, Flags, pFeatureLevels, FeatureLevels, copyCommandQueues.data(),
+                                         static_cast<UINT>(copyCommandQueues.size()), NodeMask, ppDevice,
+                                         ppImmediateContext, pChosenFeatureLevel);
     }
 
     if (result == S_OK && *ppDevice != nullptr && !rtss && State::Instance().currentD3D12Device == nullptr)
@@ -196,7 +201,7 @@ static HRESULT hkD3D11CreateDevice(IDXGIAdapter* pAdapter, D3D_DRIVER_TYPE Drive
     if (pAdapter != nullptr)
     {
         {
-            ScopedSkipSpoofing skipSpoofing {};
+            ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
 
             if (pAdapter->GetDesc(&desc) == S_OK)
             {
@@ -262,10 +267,6 @@ static HRESULT hkD3D11CreateDevice(IDXGIAdapter* pAdapter, D3D_DRIVER_TYPE Drive
     if (result == S_OK && *ppDevice != nullptr && State::Instance().currentD3D12Device == nullptr)
     {
         LOG_INFO("Device captured");
-
-        if (szName.size() > 0)
-            State::Instance().DeviceAdapterNames[*ppDevice] = wstring_to_string(szName);
-
         HookToDeviceLocal(*ppDevice);
     }
 
@@ -305,7 +306,7 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
     if (pAdapter != nullptr)
     {
         {
-            ScopedSkipSpoofing skipSpoofing {};
+            ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
 
             if (pAdapter->GetDesc(&desc) == S_OK)
             {
@@ -333,12 +334,10 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
         }
     }
 
+    static const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1 };
+
     if (!(State::Instance().gameQuirks & GameQuirk::SkipD3D11FeatureLevelElevation))
     {
-        static const D3D_FEATURE_LEVEL levels[] = {
-            D3D_FEATURE_LEVEL_11_1,
-        };
-
         D3D_FEATURE_LEVEL maxLevel = D3D_FEATURE_LEVEL_1_0_CORE;
 
         for (UINT i = 0; i < FeatureLevels; ++i)

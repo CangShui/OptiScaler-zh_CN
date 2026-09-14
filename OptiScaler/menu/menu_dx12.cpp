@@ -253,29 +253,10 @@ Menu_Dx12::~Menu_Dx12()
     ImGui_ImplDX12_Shutdown(true, !State::Instance().isShuttingDown);
     MenuCommon::Shutdown();
 
-    if (_rtvDescHeap)
-    {
-        _rtvDescHeap->Release();
-        _rtvDescHeap = nullptr;
-    }
-
-    if (_srvDescHeap)
-    {
-        _srvDescHeap->Release();
-        _srvDescHeap = nullptr;
-    }
-
-    if (_renderTargetResource[0])
-    {
-        _renderTargetResource[0]->Release();
-        _renderTargetResource[0] = nullptr;
-    }
-
-    if (_renderTargetResource[1])
-    {
-        _renderTargetResource[1]->Release();
-        _renderTargetResource[1] = nullptr;
-    }
+    SAFE_RELEASE(_rtvDescHeap);
+    SAFE_RELEASE(_srvDescHeap);
+    SAFE_RELEASE(_renderTargetResource[0]);
+    SAFE_RELEASE(_renderTargetResource[1]);
 }
 
 void Menu_Dx12::CreateRenderTarget(const D3D12_RESOURCE_DESC& InDesc)
@@ -286,10 +267,8 @@ void Menu_Dx12::CreateRenderTarget(const D3D12_RESOURCE_DESC& InDesc)
 
         if (InDesc.Width != rtDesc.Width || InDesc.Height != rtDesc.Height || InDesc.Format != rtDesc.Format)
         {
-            _renderTargetResource[0]->Release();
-            _renderTargetResource[0] = nullptr;
-            _renderTargetResource[1]->Release();
-            _renderTargetResource[1] = nullptr;
+            SAFE_RELEASE(_renderTargetResource[0]);
+            SAFE_RELEASE(_renderTargetResource[1]);
         }
         else
             return;

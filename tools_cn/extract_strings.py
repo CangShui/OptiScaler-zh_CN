@@ -5,8 +5,9 @@ import json
 import sys
 from pathlib import Path
 
-SRC = Path(r"C:\Users\Administrator\Desktop\test\OptiScaler\OptiScaler\menu")
-OUT = Path(r"C:\Users\Administrator\Desktop\test\OptiScaler\tools_cn\strings_extracted.json")
+BASE = Path(__file__).resolve().parents[1]
+SRC = BASE / "OptiScaler" / "menu"
+OUT = BASE / "tools_cn" / "strings_extracted.json"
 
 # Match string literals: "..." with escapes, and adjacent concatenation
 STR_RE = re.compile(r'"((?:[^"\\\n]|\\.)*)"')

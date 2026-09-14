@@ -336,7 +336,7 @@ static FfxErrorCode ffxFsr2ContextCreate_Vk(FfxFsr2Context* context, FfxFsr2Cont
         LOG_DEBUG("VkDevice: {:X}", (size_t) _vkDevice);
     }
 
-    if (!state.NvngxVkInited)
+    if (!state.nvngxVkInited)
     {
         NVSDK_NGX_FeatureCommonInfo fcInfo {};
         auto exePath = Util::ExePath().remove_filename();
@@ -515,7 +515,7 @@ static FfxErrorCode ffxFsr2ContextDispatch_Vk(FfxFsr2Context* context,
     LOG_DEBUG("handle: {:X}, internalResolution: {}x{}", handle->Id, dispatchDescription->renderSize.width,
               dispatchDescription->renderSize.height);
 
-    State::Instance().setInputApiName = "FSR2.X";
+    State::Instance().setInputApiName = ApiUpscalerInput::FSR2X_VK;
 
     auto evalResult =
         NVSDK_NGX_VULKAN_EvaluateFeature((VkCommandBuffer) dispatchDescription->commandList, handle, params, nullptr);

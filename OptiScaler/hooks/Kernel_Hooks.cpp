@@ -5,7 +5,6 @@
 #include "Streamline_Hooks.h"
 #include "LibraryLoad_Hooks.h"
 
-#include <fsr4/FSR4Upgrade.h>
 #include <fsr4/FSR4ModelSelection.h>
 
 #include <Util.h>
@@ -13,9 +12,11 @@
 #include <Config.h>
 
 #include <cwctype>
+#include <misc/IdentifyGpu.h>
 
 #include "Hook_Utils.h"
 
+#include "Amdxc64_Hooks.h"
 #pragma intrinsic(_ReturnAddress)
 
 static inline void NormalizePath(std::string& path)
@@ -107,10 +108,16 @@ FARPROC WINAPI KernelHooks::hk_K32_GetProcAddress(HMODULE hModule, LPCSTR lpProc
     // 2nd check is amdxcffx64.dll trying to queue amdxc64 but amdxc64 not being loaded.
     // Also skip the internal call of amdxc64
     if (lpProcName != nullptr && (hModule == amdxc64Mark || hModule == nullptr) &&
-        lstrcmpA(lpProcName, "AmdExtD3DCreateInterface") == 0 && Config::Instance()->Fsr4Update.value_or_default() &&
+        lstrcmpA(lpProcName, "AmdExtD3DCreateInterface") == 0 &&
+        IdentifyGpu::getPrimaryGpu().fsr4Support != FSR4Support::None &&
         Util::GetCallerModule(_ReturnAddress()) != KernelBaseProxy::GetModuleHandleW_()(L"amdxc64.dll"))
     {
-        return (FARPROC) &hkAmdExtD3DCreateInterface;
+        LOG_TRACE("Giving hkAmdExtD3DCreateInterface");
+        return (FARPROC) &Amdxc64Hooks::hkAmdExtD3DCreateInterface;
+    }
+    else if (hModule == amdxc64Mark)
+    {
+        return o_K32_GetProcAddress(KernelBaseProxy::GetModuleHandleW_()(L"amdxc64.dll"), lpProcName);
     }
 
     return o_K32_GetProcAddress(hModule, lpProcName);
@@ -134,13 +141,16 @@ HMODULE WINAPI KernelHooks::hk_K32_GetModuleHandleA(LPCSTR lpModuleName)
             // Therefore it should be safe for us to return a custom implementation when it's not loaded
             // This can get removed if Proton starts to ship amdxc64
 
-            CheckForGPU();
+            // For system with amdxc64 loaded - we should've caught the load and hooked it
+            // For systems without - we provide that app with a fake handle and track the usage that way
 
             auto original = o_K32_GetModuleHandleA(lpModuleName);
 
-            if (original == nullptr && Config::Instance()->Fsr4Update.value_or_default())
+            auto primaryGpu = IdentifyGpu::getPrimaryGpu();
+
+            if (original == nullptr && primaryGpu.fsr4Support != FSR4Support::None)
             {
-                LOG_INFO("amdxc64.dll is not loaded, giving a fake HMODULE");
+                LOG_INFO("giving a fake HMODULE for amdxc64.dll");
                 return amdxc64Mark;
             }
 
@@ -149,6 +159,46 @@ HMODULE WINAPI KernelHooks::hk_K32_GetModuleHandleA(LPCSTR lpModuleName)
     }
 
     return o_K32_GetModuleHandleA(lpModuleName);
+}
+
+VALIDATE_HOOK(hk_K32_GetModuleHandleW, Kernel32Proxy::PFN_GetModuleHandleW)
+HMODULE WINAPI KernelHooks::hk_K32_GetModuleHandleW(LPCWSTR lpModuleName)
+{
+    if (lpModuleName != NULL)
+    {
+        if (wcscmp(lpModuleName, L"amdxc64.dll") == 0)
+        {
+            LOG_TRACE("amdxc64.dll call");
+
+            // See comments in hk_K32_GetModuleHandleA
+
+            auto original = o_K32_GetModuleHandleW(lpModuleName);
+
+            auto primaryGpu = IdentifyGpu::getPrimaryGpu();
+
+            if (original == nullptr && primaryGpu.fsr4Support != FSR4Support::None)
+            {
+                LOG_INFO("giving a fake HMODULE for amdxc64.dll");
+                return amdxc64Mark;
+            }
+
+            return original;
+        }
+    }
+
+    return o_K32_GetModuleHandleW(lpModuleName);
+}
+
+VALIDATE_HOOK(hk_K32_GetModuleHandleExA, Kernel32Proxy::PFN_GetModuleHandleExA)
+BOOL WINAPI KernelHooks::hk_K32_GetModuleHandleExA(DWORD dwFlags, LPCSTR lpModuleName, HMODULE* phModule)
+{
+    if (lpModuleName && dwFlags == 0 && strcmp("libxell.dll", lpModuleName) == 0 && phModule)
+    {
+        *phModule = dllModule;
+        return true;
+    }
+
+    return o_K32_GetModuleHandleExA(dwFlags, lpModuleName, phModule);
 }
 
 VALIDATE_HOOK(hk_K32_GetModuleHandleExW, Kernel32Proxy::PFN_GetModuleHandleExW)
@@ -218,14 +268,17 @@ HANDLE WINAPI KernelHooks::hk_K32_CreateFileW(LPCWSTR lpFileName, DWORD dwDesire
         auto path = wstring_to_string(std::wstring(lpFileName));
         to_lower_in_place(path);
 
-        static auto signedDll = Util::FindFilePath(Util::ExePath().remove_filename(), "nvngx_dlss.dll");
-
         if (path.contains("nvngx.dll") && !path.contains("_nvngx.dll") && // apply the override to just one path
-            !IsInsideWindowsDirectory(path) && signedDll.has_value())
+            !IsInsideWindowsDirectory(path))
         {
-            LOG_DEBUG("Overriding CreateFileW for nvngx with a signed dll, original path: {}", path);
-            return o_K32_CreateFileW(signedDll.value().c_str(), dwDesiredAccess, dwShareMode, lpSecurityAttributes,
-                                     dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+            static auto& signedDll = State::Instance().nvngxReplacement;
+
+            if (signedDll.has_value())
+            {
+                LOG_DEBUG("Overriding CreateFileW for nvngx with a signed dll, original path: {}", path);
+                return o_K32_CreateFileW(signedDll.value().c_str(), dwDesiredAccess, dwShareMode, lpSecurityAttributes,
+                                         dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+            }
         }
     }
 

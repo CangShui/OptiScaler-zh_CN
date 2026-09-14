@@ -20,8 +20,6 @@ struct FG_Constants
     flag_set<FG_Flags> flags;
     uint32_t displayWidth;
     uint32_t displayHeight;
-    // uint32_t maxRenderWidth;
-    // uint32_t maxRenderHeight;
 };
 
 enum FG_ResourceType : uint32_t
@@ -74,6 +72,8 @@ class IFGFeature
     UINT64 _lastFGFrame = 0;
     bool _waitingNewFrameData = false;
     int _framesToInterpolate = -1;
+    int _maxInterpolationCount = 1;
+    bool _supportsDMFG = false;
 
     bool _isActive = false;
     UINT64 _targetFrame = 0;
@@ -147,7 +147,9 @@ class IFGFeature
     void SetInterpolationPos(UINT left, UINT top, int index = -1);
     void GetInterpolationPos(UINT& left, UINT& top, int index = -1);
     void SetResourceReady(FG_ResourceType type, int index = -1);
-    UINT GetInterpolatedFrameCount();
+    UINT GetInterpolatedFrameCount() const;
+    int GetMaxInterpolationCount() const;
+    bool GetDMFGSupport() const;
 
     void ResetCounters();
     void UpdateTarget();

@@ -138,15 +138,6 @@ Menu_Dx11::~Menu_Dx11()
     // hackzor
     std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
-    if (_renderTargetTexture)
-    {
-        _renderTargetTexture->Release();
-        _renderTargetTexture = nullptr;
-    }
-
-    if (_renderTargetView)
-    {
-        _renderTargetView->Release();
-        _renderTargetView = nullptr;
-    }
+    SAFE_RELEASE(_renderTargetTexture);
+    SAFE_RELEASE(_renderTargetView);
 }

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <type_traits>
 
@@ -19,5 +19,5 @@ template <typename Ret, typename Class, typename... Args> struct rewrite_signatu
 // Place just above function definition, example of usage:
 // VALIDATE_HOOK(hkCheckFeatureSupport, PFN_CheckFeatureSupport)
 #define VALIDATE_HOOK(HookName, PfnType)                                                                               \
-    extern std::remove_pointer_t<PfnType> HookName;                                                                    \
+    static std::remove_pointer_t<PfnType> HookName;                                                                    \
     VALIDATE_MEMBER_HOOK(HookName, PfnType)

@@ -19,6 +19,8 @@ cbuffer Params : register(b0)
     int DynamicSharpenEnabled;
     int DisplaySizeMV;
     int Debug;
+    int MotionWidth;
+    int MotionHeight;
 
     float MotionSharpness;
     float MotionTextureScale;

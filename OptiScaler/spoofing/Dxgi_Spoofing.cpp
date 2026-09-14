@@ -8,6 +8,7 @@
 #include <string>
 #include <algorithm>
 #include <cctype>
+#include <misc/IdentifyGpu.h>
 
 typedef HRESULT (*PFN_GetDesc)(IDXGIAdapter* This, DXGI_ADAPTER_DESC* pDesc);
 typedef HRESULT (*PFN_GetDesc1)(IDXGIAdapter1* This, DXGI_ADAPTER_DESC1* pDesc);
@@ -29,27 +30,14 @@ inline static bool iequals(const std::string& a, const std::string& b) { return 
 
 #pragma region DXGI Adapter methods
 
-inline static bool SkipSpoofing()
-{
-    auto skip = !Config::Instance()->DxgiSpoofing.value_or_default() || State::Instance().skipSpoofing;
-
-    if (skip)
-    {
-        LOG_TRACE("DxgiSpoofing: {}, skipSpoofing: {}, skipping spoofing",
-                  Config::Instance()->DxgiSpoofing.value_or_default(), State::Instance().skipSpoofing);
-    }
-
-    return skip;
-}
-
 HRESULT DxgiSpoofing::hkGetDesc3(IDXGIAdapter4* This, DXGI_ADAPTER_DESC3* pDesc)
 {
     auto result = o_GetDesc3(This, pDesc);
 
     auto caller = Util::WhoIsTheCaller(_ReturnAddress());
 
-    if (iequals(caller, "fakenvapi.dll") || iequals(caller, "vulkan-1.dll") || iequals(caller, "amdvlk64.dll") ||
-        iequals(caller, "dxgi.dll") || iequals(caller, "d3d12.dll") || iequals(caller, "d3d12Core.dll"))
+    if (iequals(caller, "vulkan-1.dll") || iequals(caller, "amdvlk64.dll") || iequals(caller, "dxgi.dll") ||
+        iequals(caller, "d3d12.dll") || iequals(caller, "d3d12Core.dll"))
     {
         return result;
     }
@@ -60,18 +48,6 @@ HRESULT DxgiSpoofing::hkGetDesc3(IDXGIAdapter4* This, DXGI_ADAPTER_DESC3* pDesc)
 
     if (result == S_OK)
     {
-        if (pDesc->VendorId != VendorId::Microsoft &&
-            !State::Instance().adapterDescs.contains(pDesc->AdapterLuid.HighPart | pDesc->AdapterLuid.LowPart))
-        {
-            std::wstring szName(pDesc->Description);
-            std::string descStr =
-                std::format("Adapter: {}, VRAM: {} MB, VendorId: {:#x}, DeviceId: {:#x}", wstring_to_string(szName),
-                            pDesc->DedicatedVideoMemory / (1024.0 * 1024.0), pDesc->VendorId, pDesc->DeviceId);
-            LOG_INFO("{}", descStr);
-            State::Instance().adapterDescs.insert_or_assign(pDesc->AdapterLuid.HighPart | pDesc->AdapterLuid.LowPart,
-                                                            descStr);
-        }
-
         if (Config::Instance()->DxgiVRAM.has_value())
         {
             uint64_t newMemSize = (uint64_t) Config::Instance()->DxgiVRAM.value() * 1073741824; // 1024 * 1024 * 1024
@@ -109,8 +85,8 @@ HRESULT DxgiSpoofing::hkGetDesc2(IDXGIAdapter2* This, DXGI_ADAPTER_DESC2* pDesc)
 
     auto caller = Util::WhoIsTheCaller(_ReturnAddress());
 
-    if (iequals(caller, "fakenvapi.dll") || iequals(caller, "vulkan-1.dll") || iequals(caller, "amdvlk64.dll") ||
-        iequals(caller, "dxgi.dll") || iequals(caller, "d3d12.dll") || iequals(caller, "d3d12Core.dll"))
+    if (iequals(caller, "vulkan-1.dll") || iequals(caller, "amdvlk64.dll") || iequals(caller, "dxgi.dll") ||
+        iequals(caller, "d3d12.dll") || iequals(caller, "d3d12Core.dll"))
     {
         return result;
     }
@@ -121,29 +97,19 @@ HRESULT DxgiSpoofing::hkGetDesc2(IDXGIAdapter2* This, DXGI_ADAPTER_DESC2* pDesc)
 
     if (result == S_OK)
     {
-        if (pDesc->VendorId != VendorId::Microsoft &&
-            !State::Instance().adapterDescs.contains(pDesc->AdapterLuid.HighPart | pDesc->AdapterLuid.LowPart))
-        {
-            std::wstring szName(pDesc->Description);
-            std::string descStr =
-                std::format("Adapter: {}, VRAM: {} MB, VendorId: {:#x}, DeviceId: {:#x}", wstring_to_string(szName),
-                            pDesc->DedicatedVideoMemory / (1024.0 * 1024.0), pDesc->VendorId, pDesc->DeviceId);
-            LOG_INFO("{}", descStr);
-            State::Instance().adapterDescs.insert_or_assign(pDesc->AdapterLuid.HighPart | pDesc->AdapterLuid.LowPart,
-                                                            descStr);
-        }
-
         if (Config::Instance()->DxgiVRAM.has_value())
         {
             uint64_t newMemSize = (uint64_t) Config::Instance()->DxgiVRAM.value() * 1073741824; // 1024 * 1024 * 1024
             pDesc->DedicatedVideoMemory = newMemSize;
         }
 
-        if (pDesc->VendorId != VendorId::Microsoft &&
-            (!Config::Instance()->TargetVendorId.has_value() ||
-             Config::Instance()->TargetVendorId.value() == pDesc->VendorId) &&
-            (!Config::Instance()->TargetDeviceId.has_value() ||
-             Config::Instance()->TargetDeviceId.value() == pDesc->DeviceId) &&
+        auto targetVendorIdMatches = !Config::Instance()->TargetVendorId.has_value() ||
+                                     Config::Instance()->TargetVendorId.value() == pDesc->VendorId;
+
+        auto targetDeviceIdMatches = !Config::Instance()->TargetDeviceId.has_value() ||
+                                     Config::Instance()->TargetDeviceId.value() == pDesc->DeviceId;
+
+        if (pDesc->VendorId != VendorId::Microsoft && targetVendorIdMatches && targetDeviceIdMatches &&
             Config::Instance()->DxgiSpoofing.value_or_default() && !SkipSpoofing())
         {
             pDesc->VendorId = Config::Instance()->SpoofedVendorId.value_or_default();
@@ -170,8 +136,8 @@ HRESULT DxgiSpoofing::hkGetDesc1(IDXGIAdapter1* This, DXGI_ADAPTER_DESC1* pDesc)
 
     auto caller = Util::WhoIsTheCaller(_ReturnAddress());
 
-    if (iequals(caller, "fakenvapi.dll") || iequals(caller, "vulkan-1.dll") || iequals(caller, "amdvlk64.dll") ||
-        iequals(caller, "dxgi.dll") || iequals(caller, "d3d12.dll") || iequals(caller, "d3d12Core.dll"))
+    if (iequals(caller, "vulkan-1.dll") || iequals(caller, "amdvlk64.dll") || iequals(caller, "dxgi.dll") ||
+        iequals(caller, "d3d12.dll") || iequals(caller, "d3d12Core.dll"))
     {
         return result;
     }
@@ -182,29 +148,19 @@ HRESULT DxgiSpoofing::hkGetDesc1(IDXGIAdapter1* This, DXGI_ADAPTER_DESC1* pDesc)
 
     if (result == S_OK)
     {
-        if (pDesc->VendorId != VendorId::Microsoft &&
-            !State::Instance().adapterDescs.contains(pDesc->AdapterLuid.HighPart | pDesc->AdapterLuid.LowPart))
-        {
-            std::wstring szName(pDesc->Description);
-            std::string descStr =
-                std::format("Adapter: {}, VRAM: {} MB, VendorId: {:#x}, DeviceId: {:#x}", wstring_to_string(szName),
-                            pDesc->DedicatedVideoMemory / (1024.0 * 1024.0), pDesc->VendorId, pDesc->DeviceId);
-            LOG_INFO("{}", descStr);
-            State::Instance().adapterDescs.insert_or_assign(pDesc->AdapterLuid.HighPart | pDesc->AdapterLuid.LowPart,
-                                                            descStr);
-        }
-
         if (Config::Instance()->DxgiVRAM.has_value())
         {
             uint64_t newMemSize = (uint64_t) Config::Instance()->DxgiVRAM.value() * 1073741824; // 1024 * 1024 * 1024
             pDesc->DedicatedVideoMemory = newMemSize;
         }
 
-        if (pDesc->VendorId != VendorId::Microsoft &&
-            (!Config::Instance()->TargetVendorId.has_value() ||
-             Config::Instance()->TargetVendorId.value() == pDesc->VendorId) &&
-            (!Config::Instance()->TargetDeviceId.has_value() ||
-             Config::Instance()->TargetDeviceId.value() == pDesc->DeviceId) &&
+        auto targetVendorIdMatches = !Config::Instance()->TargetVendorId.has_value() ||
+                                     Config::Instance()->TargetVendorId.value() == pDesc->VendorId;
+
+        auto targetDeviceIdMatches = !Config::Instance()->TargetDeviceId.has_value() ||
+                                     Config::Instance()->TargetDeviceId.value() == pDesc->DeviceId;
+
+        if (pDesc->VendorId != VendorId::Microsoft && targetVendorIdMatches && targetDeviceIdMatches &&
             Config::Instance()->DxgiSpoofing.value_or_default() && !SkipSpoofing())
         {
             pDesc->VendorId = Config::Instance()->SpoofedVendorId.value_or_default();
@@ -217,6 +173,17 @@ HRESULT DxgiSpoofing::hkGetDesc1(IDXGIAdapter1* This, DXGI_ADAPTER_DESC1* pDesc)
 #ifdef _DEBUG
             LOG_DEBUG("spoofing");
 #endif
+        }
+
+        if (caller.starts_with("amdxcffx64") || caller.starts_with("amd_fidelityfx_upscaler_dx12"))
+        {
+            const auto primaryGpu = IdentifyGpu::getPrimaryGpu();
+
+            if (primaryGpu.fsr4ForcedSupport && primaryGpu.fsr4Support == FSR4Support::INT8)
+            {
+                LOG_TRACE("Spoofing vendor AMD for {}", caller);
+                pDesc->VendorId = VendorId::AMD;
+            }
         }
     }
 
@@ -231,8 +198,8 @@ HRESULT DxgiSpoofing::hkGetDesc(IDXGIAdapter* This, DXGI_ADAPTER_DESC* pDesc)
 
     auto caller = Util::WhoIsTheCaller(_ReturnAddress());
 
-    if (iequals(caller, "fakenvapi.dll") || iequals(caller, "vulkan-1.dll") || iequals(caller, "amdvlk64.dll") ||
-        iequals(caller, "dxgi.dll") || iequals(caller, "d3d12.dll") || iequals(caller, "d3d12Core.dll"))
+    if (iequals(caller, "vulkan-1.dll") || iequals(caller, "amdvlk64.dll") || iequals(caller, "dxgi.dll") ||
+        iequals(caller, "d3d12.dll") || iequals(caller, "d3d12Core.dll"))
     {
         return result;
     }
@@ -243,29 +210,19 @@ HRESULT DxgiSpoofing::hkGetDesc(IDXGIAdapter* This, DXGI_ADAPTER_DESC* pDesc)
 
     if (result == S_OK)
     {
-        if (pDesc->VendorId != VendorId::Microsoft &&
-            !State::Instance().adapterDescs.contains(pDesc->AdapterLuid.HighPart | pDesc->AdapterLuid.LowPart))
-        {
-            std::wstring szName(pDesc->Description);
-            std::string descStr =
-                std::format("Adapter: {}, VRAM: {} MB, VendorId: {:#x}, DeviceId: {:#x}", wstring_to_string(szName),
-                            pDesc->DedicatedVideoMemory / (1024.0 * 1024.0), pDesc->VendorId, pDesc->DeviceId);
-            LOG_INFO("{}", descStr);
-            State::Instance().adapterDescs.insert_or_assign(pDesc->AdapterLuid.HighPart | pDesc->AdapterLuid.LowPart,
-                                                            descStr);
-        }
-
         if (Config::Instance()->DxgiVRAM.has_value())
         {
             uint64_t newMemSize = (uint64_t) Config::Instance()->DxgiVRAM.value() * 1073741824; // 1024 * 1024 * 1024
             pDesc->DedicatedVideoMemory = newMemSize;
         }
 
-        if (pDesc->VendorId != VendorId::Microsoft &&
-            (!Config::Instance()->TargetVendorId.has_value() ||
-             Config::Instance()->TargetVendorId.value() == pDesc->VendorId) &&
-            (!Config::Instance()->TargetDeviceId.has_value() ||
-             Config::Instance()->TargetDeviceId.value() == pDesc->DeviceId) &&
+        auto targetVendorIdMatches = !Config::Instance()->TargetVendorId.has_value() ||
+                                     Config::Instance()->TargetVendorId.value() == pDesc->VendorId;
+
+        auto targetDeviceIdMatches = !Config::Instance()->TargetDeviceId.has_value() ||
+                                     Config::Instance()->TargetDeviceId.value() == pDesc->DeviceId;
+
+        if (pDesc->VendorId != VendorId::Microsoft && targetVendorIdMatches && targetDeviceIdMatches &&
             Config::Instance()->DxgiSpoofing.value_or_default() && !SkipSpoofing())
         {
             pDesc->VendorId = Config::Instance()->SpoofedVendorId.value_or_default();

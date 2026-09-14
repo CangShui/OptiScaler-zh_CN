@@ -32,6 +32,7 @@ class D3d12Proxy
         {
             _dll = KernelBaseProxy::GetModuleHandleW_()(L"d3d12.dll");
 
+            // Doing this in games with Agility SDK before they are set up will crash
             if (_dll == nullptr)
                 _dll = NtdllProxy::LoadLibraryExW_Ldr(L"d3d12.dll", NULL, 0);
         }

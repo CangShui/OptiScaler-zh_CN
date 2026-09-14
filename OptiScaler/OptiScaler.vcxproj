@@ -59,6 +59,7 @@
     <UseDebugLibraries>true</UseDebugLibraries>
     <PlatformToolset>v143</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
+    <MSVCPreviewEnabled>false</MSVCPreviewEnabled>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
@@ -111,17 +112,17 @@
     <LibraryPath>$(SolutionDir)\external\xess\lib;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <IncludePath>$(ProjectDir);$(ProjectDir)include\;$(SolutionDir)external\vulkan\include;$(SolutionDir)external\nvngx_dlss_sdk;$(SolutionDir)external\xess\inc\xess;$(SolutionDir)external\xess\inc\xell;$(SolutionDir)external\xess\inc\xess_fg;$(SolutionDir)external\FidelityFX-SDK\ffx-api\include\ffx_api;$(SolutionDir)external\simpleini;$(SolutionDir)external\unordered_dense\include;$(SolutionDir)external\spdlog\include;$(SolutionDir)external\freetype;$(SolutionDir)external\streamline;$(SolutionDir)external\streamline1;$(SolutionDir)external\nvapi;$(SolutionDir)external\nlohmann;$(SolutionDir)external\fakenvapi;$(SolutionDir)external\magic_enum\include\magic_enum;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectDir);$(ProjectDir)include\;$(SolutionDir)external\vulkan\include;$(SolutionDir)external\nvngx_dlss_sdk;$(SolutionDir)external\xess\inc\xess;$(SolutionDir)external\xess\inc\xell;$(SolutionDir)external\xess\inc\xess_fg;$(SolutionDir)external\FidelityFX-SDK\ffx-api\include\ffx_api;$(SolutionDir)external\simpleini;$(SolutionDir)external\unordered_dense\include;$(SolutionDir)external\spdlog\include;$(SolutionDir)external\freetype;$(SolutionDir)external\streamline;$(SolutionDir)external\streamline1;$(SolutionDir)external\nvapi;$(SolutionDir)external\nlohmann;$(SolutionDir)external\fakenvapi;$(SolutionDir)external\magic_enum\include\magic_enum;$(SolutionDir)external\AntiLag2-SDK;$(SolutionDir)external\latencyflex;$(IncludePath)</IncludePath>
     <LibraryPath>$(ProjectDir)library\fsr2;$(ProjectDir)library\fsr2_212;$(ProjectDir)library\fsr31;$(ProjectDir)library\vulkan;$(ProjectDir)library\d3dx;$(ProjectDir)library\detours;$(SolutionDir)external\xess\lib;$(SolutionDir)external\freetype;$(LibraryPath)</LibraryPath>
     <IntDir>.\x64\Debug\</IntDir>
     <TargetExt>.dll</TargetExt>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <IncludePath>$(ProjectDir);$(ProjectDir)include\;$(SolutionDir)external\vulkan\include;$(SolutionDir)external\nvngx_dlss_sdk;$(SolutionDir)external\xess\inc\xess;$(SolutionDir)external\xess\inc\xell;$(SolutionDir)external\xess\inc\xess_fg;$(SolutionDir)external\FidelityFX-SDK\ffx-api\include\ffx_api;$(SolutionDir)external\simpleini;$(SolutionDir)external\unordered_dense\include;$(SolutionDir)external\spdlog\include;$(SolutionDir)external\freetype;$(SolutionDir)external\streamline;$(SolutionDir)external\streamline1;$(SolutionDir)external\nvapi;$(SolutionDir)external\nlohmann;$(SolutionDir)external\fakenvapi;$(SolutionDir)external\magic_enum\include\magic_enum;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectDir);$(ProjectDir)include\;$(SolutionDir)external\vulkan\include;$(SolutionDir)external\nvngx_dlss_sdk;$(SolutionDir)external\xess\inc\xess;$(SolutionDir)external\xess\inc\xell;$(SolutionDir)external\xess\inc\xess_fg;$(SolutionDir)external\FidelityFX-SDK\ffx-api\include\ffx_api;$(SolutionDir)external\simpleini;$(SolutionDir)external\unordered_dense\include;$(SolutionDir)external\spdlog\include;$(SolutionDir)external\freetype;$(SolutionDir)external\streamline;$(SolutionDir)external\streamline1;$(SolutionDir)external\nvapi;$(SolutionDir)external\nlohmann;$(SolutionDir)external\fakenvapi;$(SolutionDir)external\magic_enum\include\magic_enum;$(SolutionDir)external\AntiLag2-SDK;$(SolutionDir)external\latencyflex;$(IncludePath)</IncludePath>
     <LibraryPath>$(ProjectDir)library\fsr2;$(ProjectDir)library\fsr2_212;$(ProjectDir)library\fsr31;$(ProjectDir)library\vulkan;$(ProjectDir)library\d3dx;$(ProjectDir)library\detours;$(SolutionDir)external\xess\lib;$(SolutionDir)external\freetype;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">
-    <IncludePath>$(ProjectDir);$(ProjectDir)include\;$(SolutionDir)external\vulkan\include;$(SolutionDir)external\nvngx_dlss_sdk;$(SolutionDir)external\xess\inc\xess;$(SolutionDir)external\xess\inc\xell;$(SolutionDir)external\xess\inc\xess_fg;$(SolutionDir)external\FidelityFX-SDK\ffx-api\include\ffx_api;$(SolutionDir)external\simpleini;$(SolutionDir)external\unordered_dense\include;$(SolutionDir)external\spdlog\include;$(SolutionDir)external\freetype;$(SolutionDir)external\streamline;$(SolutionDir)external\streamline1;$(SolutionDir)external\nvapi;$(SolutionDir)external\nlohmann;$(SolutionDir)external\fakenvapi;$(SolutionDir)external\magic_enum\include\magic_enum;$(IncludePath)</IncludePath>
+    <IncludePath>$(ProjectDir);$(ProjectDir)include\;$(SolutionDir)external\vulkan\include;$(SolutionDir)external\nvngx_dlss_sdk;$(SolutionDir)external\xess\inc\xess;$(SolutionDir)external\xess\inc\xell;$(SolutionDir)external\xess\inc\xess_fg;$(SolutionDir)external\FidelityFX-SDK\ffx-api\include\ffx_api;$(SolutionDir)external\simpleini;$(SolutionDir)external\unordered_dense\include;$(SolutionDir)external\spdlog\include;$(SolutionDir)external\freetype;$(SolutionDir)external\streamline;$(SolutionDir)external\streamline1;$(SolutionDir)external\nvapi;$(SolutionDir)external\nlohmann;$(SolutionDir)external\fakenvapi;$(SolutionDir)external\magic_enum\include\magic_enum;$(SolutionDir)external\AntiLag2-SDK;$(SolutionDir)external\latencyflex;$(IncludePath)</IncludePath>
     <LibraryPath>$(ProjectDir)library\fsr2;$(ProjectDir)library\fsr2_212;$(ProjectDir)library\fsr31;$(ProjectDir)library\vulkan;$(ProjectDir)library\d3dx;$(ProjectDir)library\detours;$(SolutionDir)external\xess\lib;$(SolutionDir)external\freetype;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -249,18 +250,19 @@ move $(SolutionDir)x64\Release\$(TargetFileName) $(SolutionDir)x64\Release\a\
 md $(SolutionDir)x64\Release\a\Licenses
 del /Q $(SolutionDir)x64\Release\a\Licenses\*.*
 copy $(SolutionDir)external\xess\LICENSE.txt $(SolutionDir)x64\Release\a\Licenses\XeSS_LICENSE.txt /Y
-copy $(SolutionDir)external\xess\bin\*.dll $(SolutionDir)x64\Release\a\ /Y
-copy $(SolutionDir)external\FidelityFX-SDK\docs\license.md $(SolutionDir)x64\Release\a\Licenses\FidelityFX_v1_LICENSE.md /Y
-copy $(SolutionDir)external\FidelityFX-SDK\PrebuiltSignedDLL\amd_fidelityfx_vk.dll $(SolutionDir)x64\Release\a\ /Y
-copy $(SolutionDir)external\FidelityFX-SDK-v2\Kits\FidelityFX\signedbin\amd_fidelityfx_loader_dx12.dll $(SolutionDir)x64\Release\a\amd_fidelityfx_dx12.dll /Y
-copy $(SolutionDir)external\FidelityFX-SDK-v2\Kits\FidelityFX\signedbin\amd_fidelityfx_upscaler_dx12.dll $(SolutionDir)x64\Release\a\ /Y
-copy $(SolutionDir)external\FidelityFX-SDK-v2\Kits\FidelityFX\signedbin\amd_fidelityfx_framegeneration_dx12.dll $(SolutionDir)x64\Release\a\ /Y
+md $(SolutionDir)x64\Release\a\OptiScaler
+copy $(SolutionDir)external\xess\bin\*.dll $(SolutionDir)x64\Release\a\OptiScaler\ /Y
+copy $(SolutionDir)external\FidelityFX-SDK\docs\license.md $(SolutionDir)x64\Release\a\OptiScaler\Licenses\FidelityFX_v1_LICENSE.md /Y
+copy $(SolutionDir)external\FidelityFX-SDK\PrebuiltSignedDLL\amd_fidelityfx_vk.dll $(SolutionDir)x64\Release\a\OptiScaler\ /Y
+copy $(SolutionDir)external\FidelityFX-SDK-v2\Kits\FidelityFX\signedbin\amd_fidelityfx_loader_dx12.dll $(SolutionDir)x64\Release\a\OptiScaler\ /Y
+copy $(SolutionDir)external\FidelityFX-SDK-v2\Kits\FidelityFX\signedbin\amd_fidelityfx_upscaler_dx12.dll $(SolutionDir)x64\Release\a\OptiScaler\ /Y
+copy $(SolutionDir)external\FidelityFX-SDK-v2\Kits\FidelityFX\signedbin\amd_fidelityfx_framegeneration_dx12.dll $(SolutionDir)x64\Release\a\OptiScaler\ /Y
 copy $(SolutionDir)external\FidelityFX-SDK-v2\docs\license.md $(SolutionDir)x64\Release\a\Licenses\FidelityFX_v2_LICENSE.md /Y
 copy $(SolutionDir)OptiScaler.ini $(SolutionDir)x64\Release\a\ /Y
 copy $(SolutionDir)setup_windows.bat $(SolutionDir)x64\Release\a\ /Y
 copy $(SolutionDir)setup_linux.sh $(SolutionDir)x64\Release\a\ /Y
-md $(SolutionDir)x64\Release\a\D3D12_Optiscaler\
-copy "$(SolutionDir)external\directx_agility_sdk\lib\*.dll" $(SolutionDir)x64\Release\a\D3D12_Optiscaler\ /Y
+md $(SolutionDir)x64\Release\a\OptiScaler\D3D12_OptiScaler\
+copy "$(SolutionDir)external\directx_agility_sdk\lib\*.dll" $(SolutionDir)x64\Release\a\OptiScaler\D3D12_OptiScaler\ /Y
 copy "$(SolutionDir)external\directx_agility_sdk\LICENSE.txt" $(SolutionDir)x64\Release\a\Licenses\DirectX_LICENSE.txt /Y
 copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y</Command>
     </PostBuildEvent>
@@ -301,6 +303,11 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     </PreBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="framegen\nvngx\Nvngx_Combo.h" />
+    <ClInclude Include="fsr4\FSR4Upgrade.h" />
+    <ClInclude Include="gpu_time\GpuTime_Dx11.h" />
+    <ClInclude Include="gpu_time\GpuTime_Dx12.h" />
+    <ClInclude Include="hooks\Amdxc64_Hooks.h" />
     <ClInclude Include="DllNames.h" />
     <ClInclude Include="exports\d3d12.h" />
     <ClInclude Include="exports\dbghelp.h" />
@@ -311,9 +318,11 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="exports\winhttp.h" />
     <ClInclude Include="exports\wininet.h" />
     <ClInclude Include="exports\winmm.h" />
+    <ClInclude Include="framegen\dlssg\DLSSG_Dx12.h" />
     <ClInclude Include="framegen\ffx\FSRFG_Dx12.h" />
     <ClInclude Include="framegen\IFGFeature.h" />
     <ClInclude Include="framegen\IFGFeature_Dx12.h" />
+    <ClInclude Include="framegen\nvngx\Nvngx_FG.h" />
     <ClInclude Include="fsr4\FSR4ModelSelection.h" />
     <ClInclude Include="hooks\D3D12_Hooks.h" />
     <ClInclude Include="hooks\DxgiFactory_Hooks.h" />
@@ -323,20 +332,61 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="hooks\Hook_Utils.h" />
     <ClInclude Include="hooks\LibraryLoad_Hooks.h" />
     <ClInclude Include="hooks\CommandBuffer_StateTracker.h" />
+    <ClInclude Include="framegen\nvngx\IFGNvngx.h" />
+    <ClInclude Include="inputs\FG\Streamline_Inputs_Sl1_Dx12.h" />
+    <ClInclude Include="include\device_info\device_info.hpp" />
+    <ClInclude Include="inputs\FG\Upscaler_Inputs_Dx11wDx12.h" />
+    <ClInclude Include="low_latency\input\input_common.h" />
+    <ClInclude Include="low_latency\input\input_reflex.h" />
+    <ClInclude Include="low_latency\input\input_xell.h" />
+    <ClInclude Include="low_latency\input\input_antilag2.h" />
+    <ClInclude Include="shaders\magnifier\Magnifier_Dx11.h" />
+    <ClInclude Include="menu\input\input_system.h" />
+    <ClInclude Include="menu\input\input_system_internal.h" />
+    <ClInclude Include="framegen\nvngx\Nvngx_FFX.h" />
+    <ClInclude Include="framegen\nvngx\Nvngx_Nukems.h" />
+    <ClInclude Include="framegen\nvngx\Nvngx_DllProxy.h" />
+    <ClInclude Include="framegen\nvngx\Nvngx_Arturs.h" />
+    <ClInclude Include="shaders\hudless_compare_compute\HCC_Common.h" />
+    <ClInclude Include="shaders\hudless_compare_compute\HCC_Dx12.h" />
+    <ClInclude Include="hooks\Xell_Hooks.h" />
+    <ClInclude Include="low_latency\ll_util.h" />
+    <ClInclude Include="nvapi\fakenvapi\log.h" />
+    <ClInclude Include="nvapi\fakenvapi\low_latency.h" />
+    <ClInclude Include="low_latency\low_latency_tech\ll_antilag2.h" />
+    <ClInclude Include="low_latency\low_latency_tech\ll_antilag_vk.h" />
+    <ClInclude Include="low_latency\low_latency_tech\ll_latencyflex.h" />
+    <ClInclude Include="low_latency\low_latency_tech\ll_xell.h" />
+    <ClInclude Include="low_latency\low_latency_tech\low_latency_tech.h" />
+    <ClInclude Include="nvapi\fakenvapi\nvapi_calls.h" />
+    <ClInclude Include="proxies\Streamline_Proxy.h" />
+    <ClInclude Include="shaders\magnifier\Magnifier_Common.h" />
+    <ClInclude Include="shaders\magnifier\Magnifier_Dx12.h" />
+    <ClInclude Include="shaders\magnifier\Magnifier_Vk.h" />
+    <ClInclude Include="shaders\magnifier\precompile\Magnifier_Shader_Vk.h" />
     <ClInclude Include="shaders\rcas\precompile\da_das_sharpen_Shader.h" />
     <ClInclude Include="shaders\rcas\precompile\da_das_sharpen_Shader_Dx11.h" />
     <ClInclude Include="shaders\rcas\precompile\da_das_sharpen_Shader_Vk.h" />
     <ClInclude Include="shaders\rcas\precompile\da_rcas_sharpen_Shader.h" />
     <ClInclude Include="shaders\rcas\precompile\da_rcas_sharpen_Shader_Dx11.h" />
     <ClInclude Include="shaders\rcas\precompile\da_rcas_sharpen_Shader_Vk.h" />
+    <ClInclude Include="shaders\rcas\precompile\RCAS_Shader.h" />
+    <ClInclude Include="shaders\rcas\precompile\RCAS_Shader_Dx11.h" />
+    <ClInclude Include="shaders\rcas\precompile\RCAS_Shader_Vk.h" />
     <ClInclude Include="shaders\rcas\shaders\DA_DAS_Shader.h" />
     <ClInclude Include="shaders\rcas\shaders\DA_RCAS_Shader.h" />
     <ClInclude Include="shaders\rcas\shaders\RCAS_Shader.h" />
+    <ClInclude Include="shaders\Shader_Common.h" />
+    <ClInclude Include="misc\SkipSpoof.h" />
+    <ClInclude Include="shaders\Shader_Dx11.h" />
     <ClInclude Include="spoofing\User32_Spoofing.h" />
     <ClInclude Include="hooks\VulkanwDx12_Hooks.h" />
+    <ClInclude Include="misc\IdentifyGpu.h" />
     <ClInclude Include="inputs\FSR2_Dx11.h" />
     <ClInclude Include="inputs\FSR2_Vk.h" />
     <ClInclude Include="inputs\XeSS_Dx11.h" />
+    <ClInclude Include="MathUtils.h" />
+    <ClInclude Include="OptiTypes.h" />
     <ClInclude Include="shaders\depth_invert\DI_Common.h" />
     <ClInclude Include="shaders\depth_invert\DI_Dx12.h" />
     <ClInclude Include="shaders\depth_invert\precompiled\DI_Shader.h" />
@@ -366,7 +416,6 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\output_scaling\precompile\bcds_lanczos3_Shader_Vk.h" />
     <ClInclude Include="shaders\output_scaling\precompile\bcds_magc_Shader_Vk.h" />
     <ClInclude Include="shaders\output_scaling\precompile\bcus_Shader_Vk.h" />
-    <ClInclude Include="shaders\rcas\precompile\RCAS_Shader_Vk.h" />
     <ClInclude Include="shaders\rcas\RCAS_Vk.h" />
     <ClInclude Include="shaders\render_ui\precompile\render_ui_pm_PShader.h" />
     <ClInclude Include="shaders\render_ui\precompile\render_ui_pm_VShader.h" />
@@ -380,13 +429,17 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\Shader_Dx12Utils.h" />
     <ClInclude Include="shaders\Shader_Vk.h" />
     <ClInclude Include="shaders\Shader_VkUtils.h" />
+    <ClInclude Include="low_latency\input\input_uell.h" />
     <ClInclude Include="upscalers\fsr2_212\FSR2Feature_VkOnDx12_212.h" />
-    <ClInclude Include="upscalers\fsr31\FSR31Feature_VkOn12.h" />
+    <ClInclude Include="upscalers\ffx\FFXFeature_VkOn12.h" />
+    <ClInclude Include="upscalers\fsr31\FSR31Feature.h" />
     <ClInclude Include="upscalers\IFeature_VkwDx12.h" />
-    <ClInclude Include="upscaler_time\UpscalerTime_Dx11.h" />
-    <ClInclude Include="upscaler_time\UpscalerTime_Dx12.h" />
     <ClInclude Include="upscaler_time\UpscalerTime_Vk.h" />
     <ClInclude Include="SysUtils.h" />
+    <ClInclude Include="with_dx12\dx11_with_dx12.h" />
+    <ClInclude Include="with_dx12\with_dx12.h" />
+    <ClInclude Include="with_dx12\dx11_with_dx12_sc.h" />
+    <ClInclude Include="misc\HiddenWindow.h" />
     <ClInclude Include="wrapped\wrapped_factory.h" />
     <ClInclude Include="include\spdlog_sink\debug_sink.h" />
     <ClInclude Include="inputs\FG\FSR3_Dx12_FG.h" />
@@ -456,12 +509,11 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="upscalers\FeatureProvider_Dx11.h" />
     <ClInclude Include="upscalers\FeatureProvider_Dx12.h" />
     <ClInclude Include="upscalers\FeatureProvider_Vk.h" />
-    <ClInclude Include="upscalers\fsr31\FSR31Feature.h" />
+    <ClInclude Include="upscalers\ffx\FFXFeature.h" />
     <ClInclude Include="upscalers\fsr31\FSR31Feature_Dx11.h" />
-    <ClInclude Include="upscalers\fsr31\FSR31Feature_Dx11On12.h" />
-    <ClInclude Include="upscalers\fsr31\FSR31Feature_Dx12.h" />
-    <ClInclude Include="upscalers\fsr31\FSR31Feature_Vk.h" />
-    <ClInclude Include="inputs\FG\DLSSG_Mod.h" />
+    <ClInclude Include="upscalers\ffx\FFXFeature_Dx11On12.h" />
+    <ClInclude Include="upscalers\ffx\FFXFeature_Dx12.h" />
+    <ClInclude Include="upscalers\ffx\FFXFeature_Vk.h" />
     <ClInclude Include="inputs\FfxApi_Dx12.h" />
     <ClInclude Include="inputs\FSR2_Dx12.h" />
     <ClInclude Include="inputs\FSR3_Dx12.h" />
@@ -489,7 +541,6 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="upscalers\fsr2\FSR2Feature_Dx11On12.h" />
     <ClInclude Include="upscalers\fsr2\FSR2Feature_Dx12.h" />
     <ClInclude Include="upscalers\fsr2\FSR2Feature_Vk.h" />
-    <ClInclude Include="fsr4\FSR4Upgrade.h" />
     <ClInclude Include="upscalers\IFeature_Dx11.h" />
     <ClInclude Include="upscalers\IFeature_Dx12.h" />
     <ClInclude Include="upscalers\IFeature.h" />
@@ -505,7 +556,6 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="menu\menu_overlay_vk.h" />
     <ClInclude Include="wrapped\wrapped_swapchain.h" />
     <ClInclude Include="Logger.h" />
-    <ClInclude Include="NVNGX_Parameter.h" />
     <ClInclude Include="proxies\NVNGX_Proxy.h" />
     <ClInclude Include="output_scaling\OS_Dx11.h" />
     <ClInclude Include="pch.h" />
@@ -536,8 +586,6 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="shaders\output_scaling\precompile\bcds_magc_Shader_Dx11.h" />
     <ClInclude Include="shaders\output_scaling\precompile\BCUS_Shader.h" />
     <ClInclude Include="shaders\output_scaling\precompile\BCUS_Shader_Dx11.h" />
-    <ClInclude Include="shaders\rcas\precompile\RCAS_Shader.h" />
-    <ClInclude Include="shaders\rcas\precompile\RCAS_Shader_Dx11.h" />
     <ClInclude Include="shaders\rcas\RCAS_Common.h" />
     <ClInclude Include="shaders\rcas\RCAS_Dx11.h" />
     <ClInclude Include="shaders\rcas\RCAS_Dx12.h" />
@@ -548,13 +596,20 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="version_check.h" />
     <ClInclude Include="upscalers\xess\XeSSFeature_Dx11.h" />
     <ClInclude Include="proxies\XeSS_Proxy.h" />
+    <ClInclude Include="NVNGX_Parameter.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="framegen\nvngx\Nvngx_Combo.cpp" />
+    <ClCompile Include="fsr4\FSR4Upgrade.cpp" />
+    <ClCompile Include="gpu_time\GpuTime_Dx11.cpp" />
+    <ClCompile Include="gpu_time\GpuTime_Dx12.cpp" />
+    <ClCompile Include="hooks\Amdxc64_Hooks.cpp" />
+    <ClCompile Include="framegen\dlssg\DLSSG_Dx12.cpp" />
     <ClCompile Include="framegen\ffx\FSRFG_Dx12.cpp" />
     <ClCompile Include="framegen\IFGFeature.cpp" />
     <ClCompile Include="framegen\IFGFeature_Dx12.cpp" />
+    <ClCompile Include="framegen\nvngx\Nvngx_FG.cpp" />
     <ClCompile Include="fsr4\FSR4ModelSelection.cpp" />
-    <ClCompile Include="fsr4\FSR4Upgrade.cpp" />
     <ClCompile Include="hooks\D3D12_Hooks.cpp" />
     <ClCompile Include="hooks\DxgiFactory_Hooks.cpp" />
     <ClCompile Include="hooks\DxgiFactory_WrappedCalls.cpp" />
@@ -563,32 +618,81 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="hooks\Kernel_Hooks.cpp" />
     <ClCompile Include="hooks\LibraryLoad_Hooks.cpp" />
     <ClCompile Include="hooks\VulkanwDx12_Hooks.cpp" />
+    <ClCompile Include="hooks\Xell_Hooks.cpp" />
+    <ClCompile Include="inputs\FG\Streamline_Inputs_Sl1_Dx12.cpp" />
+    <ClCompile Include="include\device_info\device_info.cpp" />
+    <ClCompile Include="inputs\FG\Upscaler_Inputs_Dx11wDx12.cpp" />
+    <ClCompile Include="low_latency\input\input_common.cpp" />
+    <ClCompile Include="low_latency\input\input_reflex.cpp" />
+    <ClCompile Include="low_latency\input\input_xell.cpp" />
+    <ClCompile Include="low_latency\input\input_antilag2.cpp" />
+    <ClCompile Include="shaders\magnifier\Magnifier_Dx11.cpp" />
+    <ClCompile Include="menu\input\input_system.cpp" />
+    <ClCompile Include="menu\input\input_system_cursor.cpp" />
+    <ClCompile Include="menu\input\input_system_detours.cpp" />
+    <ClCompile Include="menu\input\input_system_directinput.cpp" />
+    <ClCompile Include="menu\input\input_system_gameinput.cpp" />
+    <ClCompile Include="menu\input\input_system_hid.cpp" />
+    <ClCompile Include="menu\input\input_system_messages.cpp" />
+    <ClCompile Include="menu\input\input_system_raw.cpp" />
+    <ClCompile Include="menu\input\input_system_window.cpp" />
+    <ClCompile Include="menu\input\input_system_windows_hooks.cpp" />
+    <ClCompile Include="menu\input\input_system_xinput.cpp" />
+    <ClCompile Include="misc\IdentifyGpu.cpp" />
     <ClCompile Include="inputs\FSR2_Dx11.cpp" />
     <ClCompile Include="inputs\FSR2_Vk.cpp" />
     <ClCompile Include="inputs\XeSS_Dx11.cpp" />
+    <ClCompile Include="low_latency\ll_util.cpp" />
+    <ClCompile Include="nvapi\fakenvapi\log.cpp" />
+    <ClCompile Include="nvapi\fakenvapi\low_latency.cpp" />
+    <ClCompile Include="nvapi\fakenvapi\low_latency_d3d.cpp" />
+    <ClCompile Include="low_latency\low_latency_tech\ll_antilag2.cpp" />
+    <ClCompile Include="low_latency\low_latency_tech\ll_antilag_vk.cpp" />
+    <ClCompile Include="low_latency\low_latency_tech\ll_latencyflex.cpp" />
+    <ClCompile Include="low_latency\low_latency_tech\ll_xell.cpp" />
+    <ClCompile Include="nvapi\fakenvapi\low_latency_vk.cpp" />
+    <ClCompile Include="nvapi\fakenvapi\nvapi_calls.cpp" />
+    <ClCompile Include="framegen\nvngx\Nvngx_FFX.cpp" />
+    <ClCompile Include="framegen\nvngx\Nvngx_Nukems.cpp" />
+    <ClCompile Include="framegen\nvngx\Nvngx_Arturs.cpp" />
+    <ClCompile Include="NVNGX_Parameter.cpp" />
+    <ClCompile Include="framegen\nvngx\Nvngx_DllProxy.cpp" />
+    <ClCompile Include="OptiTypes.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='ReleaseDebug|x64'">Create</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="shaders\depth_invert\DI_Dx12.cpp" />
+    <ClCompile Include="shaders\hudless_compare_compute\HCC_Dx12.cpp" />
     <ClCompile Include="shaders\hud_copy\HudCopy_Dx12.cpp" />
     <ClCompile Include="shaders\depth_transfer\DT_Vk.cpp" />
+    <ClCompile Include="shaders\magnifier\Magnifier_Common.cpp" />
+    <ClCompile Include="shaders\magnifier\Magnifier_Dx12.cpp" />
+    <ClCompile Include="shaders\magnifier\Magnifier_Vk.cpp" />
     <ClCompile Include="shaders\output_scaling\OS_Vk.cpp" />
+    <ClCompile Include="shaders\rcas\RCAS_Common.cpp" />
     <ClCompile Include="shaders\rcas\RCAS_Vk.cpp" />
+    <ClCompile Include="shaders\Shader_Common.cpp" />
     <ClCompile Include="shaders\render_ui\RUI_Dx12.cpp" />
     <ClCompile Include="shaders\resource_copy\RC_Vk.cpp" />
     <ClCompile Include="shaders\Shader_Dx12.cpp" />
     <ClCompile Include="shaders\Shader_Vk.cpp" />
+    <ClCompile Include="misc\SkipSpoof.cpp" />
+    <ClCompile Include="shaders\Shader_Dx11.cpp" />
     <ClCompile Include="spoofing\Dxgi_Spoofing.cpp" />
     <ClCompile Include="spoofing\User32_Spoofing.cpp" />
     <ClCompile Include="spoofing\Vulkan_Spoofing.cpp" />
+    <ClCompile Include="low_latency\input\input_uell.cpp" />
     <ClCompile Include="upscalers\fsr2_212\FSR2Feature_VkOnDx12_212.cpp" />
-    <ClCompile Include="upscalers\fsr31\FSR31Feature_VkOn12.cpp" />
+    <ClCompile Include="upscalers\ffx\FFXFeature_VkOn12.cpp" />
+    <ClCompile Include="upscalers\fsr31\FSR31Feature.cpp" />
+    <ClCompile Include="upscalers\IFeature_Vk.cpp" />
     <ClCompile Include="upscalers\IFeature_VkwDx12.cpp" />
-    <ClCompile Include="upscaler_time\UpscalerTime_Dx11.cpp" />
-    <ClCompile Include="upscaler_time\UpscalerTime_Dx12.cpp" />
     <ClCompile Include="upscaler_time\UpscalerTime_Vk.cpp" />
+    <ClCompile Include="with_dx12\dx11_with_dx12.cpp" />
+    <ClCompile Include="with_dx12\with_dx12.cpp" />
+    <ClCompile Include="with_dx12\dx11_with_dx12_sc.cpp" />
     <ClCompile Include="wrapped\wrapped_factory.cpp" />
     <ClCompile Include="inputs\FG\FSR3_Dx12_FG.cpp" />
     <ClCompile Include="inputs\FG\Streamline_Inputs_Dx12.cpp" />
@@ -658,11 +762,11 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="upscalers\fsr2_212\FSR2Feature_Dx11On12_212.cpp" />
     <ClCompile Include="upscalers\fsr2_212\FSR2Feature_Dx12_212.cpp" />
     <ClCompile Include="upscalers\fsr2_212\FSR2Feature_Vk_212.cpp" />
-    <ClCompile Include="upscalers\fsr31\FSR31Feature.cpp" />
+    <ClCompile Include="upscalers\ffx\FFXFeature.cpp" />
     <ClCompile Include="upscalers\fsr31\FSR31Feature_Dx11.cpp" />
-    <ClCompile Include="upscalers\fsr31\FSR31Feature_Dx11On12.cpp" />
-    <ClCompile Include="upscalers\fsr31\FSR31Feature_Dx12.cpp" />
-    <ClCompile Include="upscalers\fsr31\FSR31Feature_Vk.cpp" />
+    <ClCompile Include="upscalers\ffx\FFXFeature_Dx11On12.cpp" />
+    <ClCompile Include="upscalers\ffx\FFXFeature_Dx12.cpp" />
+    <ClCompile Include="upscalers\ffx\FFXFeature_Vk.cpp" />
     <ClCompile Include="upscalers\IFeature_Dx11.cpp" />
     <ClCompile Include="upscalers\IFeature_Dx11wDx12.cpp" />
     <ClInclude Include="upscalers\IFeature_Dx11wDx12.h" />
@@ -742,6 +846,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ResourceCompile Include="OptiScaler.rc" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="shaders\magnifier\precompile\Magnifier_Shader_Vk.spv" />
     <None Include="Source.def" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

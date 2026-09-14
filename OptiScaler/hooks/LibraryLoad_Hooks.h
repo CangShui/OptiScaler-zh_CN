@@ -4,8 +4,6 @@
 class LibraryLoadHooks
 {
   private:
-    inline static std::unordered_map<std::wstring, bool> _overlayMethodsCalled;
-
     static void CheckModulesInMemory();
     static bool StartsWithInsensitive(std::wstring_view str, std::wstring_view prefix);
 
