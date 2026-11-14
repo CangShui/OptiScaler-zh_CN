@@ -6,7 +6,7 @@
 
 ## 📥 下载
 
-请到 **[Releases](../../releases) 页面下载** 编译好的成品压缩包（`OptiScaler_v10.0.0-nightly-20261114_汉化版.zip`），与官方发布包同布局，解压即用。
+请到 **[Releases](../../releases) 页面下载** 编译好的成品压缩包（`OptiScaler_v10.0.0-nightly-20261114_zh-CN.7z`），与官方发布包同布局，解压即用。
 
 ## ✅ 汉化内容
 
