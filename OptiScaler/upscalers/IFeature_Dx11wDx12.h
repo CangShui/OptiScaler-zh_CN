@@ -9,11 +9,13 @@
 #include <d3d11_4.h>
 #include <dxgi1_6.h>
 
-#define DX11WDX12_NUM_OF_BUFFERS 2
+#define DX11WDX12_COMMAND_BUFFER_COUNT 3
 
 class IFeature_Dx11wDx12 : public virtual IFeature_Dx11
 {
   private:
+    std::vector<DetailedGpuTime> detailedGpuTimes;
+
     template <typename F, typename Default> auto CallFeature(F&& f, Default&& def)
     {
         if (auto feature = dx12Feature.get(); feature)
@@ -31,25 +33,19 @@ class IFeature_Dx11wDx12 : public virtual IFeature_Dx11
     D3D12_COMMAND_LIST_TYPE Dx12CommandListType = D3D12_COMMAND_LIST_TYPE_DIRECT;
 
     ID3D12CommandQueue* Dx12CommandQueue = nullptr;
-    ID3D12CommandAllocator* Dx12CommandAllocator[DX11WDX12_NUM_OF_BUFFERS] {};
-    ID3D12GraphicsCommandList* Dx12CommandList[DX11WDX12_NUM_OF_BUFFERS] {};
+    ID3D12CommandAllocator* Dx12CommandAllocator[DX11WDX12_COMMAND_BUFFER_COUNT] {};
+    ID3D12GraphicsCommandList* Dx12CommandList[DX11WDX12_COMMAND_BUFFER_COUNT] {};
     ID3D12Fence* Dx12Fence = nullptr;
     HANDLE Dx12FenceEvent = nullptr;
     UINT64 Dx12FenceValue = 0;
-    UINT64 Dx12CommandAllocatorFenceValue[DX11WDX12_NUM_OF_BUFFERS] = {};
+    UINT64 Dx12CommandAllocatorFenceValue[DX11WDX12_COMMAND_BUFFER_COUNT] = {};
 
-    Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C dx11Color = {};
-    Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C dx11Mv = {};
-    Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C dx11Depth = {};
-    Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C dx11Reactive = {};
-    Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C dx11Exp = {};
-    Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C dx11Out = {};
-
-    ID3D11Resource* paramOutput[DX11WDX12_NUM_OF_BUFFERS] = {};
+    // Per feature, sharing it between features makes them recreate each other's in-flight resources
+    Dx11WithDx12::D3D11_UPSCALER_RESOURCE_CACHE_C ResourceCache = {};
 
     bool CreateD3D12Objects();
     bool ProcessDx11Textures(const NVSDK_NGX_Parameter* InParameters);
-    bool CopyBackOutput();
+    bool CopyBackOutput(const D3D11_BOX* InView, UINT InDstX, UINT InDstY);
 
     void ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D12Resource* InResource,
                          D3D12_RESOURCE_STATES InBeforeState, D3D12_RESOURCE_STATES InAfterState);
@@ -71,17 +67,56 @@ class IFeature_Dx11wDx12 : public virtual IFeature_Dx11
     bool IsWithDx12() final { return true; }
     API Api() const override { return API::DX12; }
 
+    // Used by DX11 FG to reuse resources this feature already shared with D3D12
+    const Dx11WithDx12::D3D11_UPSCALER_RESOURCE_CACHE_C& GetResourceCache() const { return ResourceCache; }
+
     std::optional<double> ReadUpscalerTime(void* deviceContextVoid) override
     {
         if (auto feature = dx12Feature.get(); feature && Dx12CommandQueue)
-            return feature->ReadUpscalerTime(Dx12CommandQueue);
+        {
+            auto dx12UpscalerTime = feature->ReadUpscalerTime(Dx12CommandQueue);
+
+            feature->ReadDetailedGpuTimes(Dx12CommandQueue, detailedGpuTimes);
+
+            // Count up shader times that are included in upscalerWithInterop but not in dx12UpscalerTime
+            double deductedUpscalerTime = 0.0;
+            for (const auto& time : detailedGpuTimes)
+            {
+                if (!time.includedInUpscalerTime)
+                {
+                    deductedUpscalerTime += time.time;
+                }
+            }
+
+            auto upscalerWithInterop = UpscalerTime->ReadGpuTime((ID3D11DeviceContext*) deviceContextVoid);
+
+            if (dx12UpscalerTime)
+            {
+                if (upscalerWithInterop)
+                {
+                    const double interopTime = *upscalerWithInterop - *dx12UpscalerTime - deductedUpscalerTime;
+
+                    if (std::isfinite(interopTime) && interopTime > 0.0)
+                    {
+                        detailedGpuTimes.push_back({ "Interop", interopTime, true });
+                        return *dx12UpscalerTime + interopTime;
+                    }
+                }
+
+                // Dx11 timing has issue use Dx12 timing.
+                return dx12UpscalerTime;
+            }
+
+            return upscalerWithInterop;
+        }
 
         return std::nullopt;
     };
+
     void ReadDetailedGpuTimes(void* deviceContextVoid, std::vector<DetailedGpuTime>& detailedGpuTimes) override
     {
-        if (auto feature = dx12Feature.get(); feature && Dx12CommandQueue)
-            return feature->ReadDetailedGpuTimes(Dx12CommandQueue, detailedGpuTimes);
+        // We already queried and prepared detailedGpuTimes in ReadUpscalerTime
+        detailedGpuTimes = this->detailedGpuTimes;
     };
 
     feature_version Version() final
@@ -94,10 +129,10 @@ class IFeature_Dx11wDx12 : public virtual IFeature_Dx11
         return CallFeature([](auto f) { return f->JitterCount(); }, size_t {});
     }
 
-    void TickFrozenCheck() override
+    void TickFrozenCheck(uint32_t presentPerEval = 1) override
     {
         if (auto feature = dx12Feature.get(); feature)
-            return feature->TickFrozenCheck();
+            return feature->TickFrozenCheck(presentPerEval);
     };
 
     bool IsFrozen() override

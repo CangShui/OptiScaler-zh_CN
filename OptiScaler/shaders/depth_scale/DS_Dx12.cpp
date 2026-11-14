@@ -15,10 +15,11 @@ bool DS_Dx12::CreateBufferResource(ID3D12Device* InDevice, ID3D12Resource* InSou
 
     auto resourceFormat = DXGI_FORMAT_R32_FLOAT;
 
+    auto oldBuffer = _buffer;
     auto result = Shader_Dx12::CreateBufferResource(InDevice, InSource, InState, &_buffer, resourceFlags, InWidth,
                                                     InHeight, resourceFormat);
 
-    if (result)
+    if (result && _buffer != oldBuffer)
     {
         _buffer->SetName(L"Upscaled_Depth_Buffer");
         _bufferState = InState;
@@ -54,7 +55,7 @@ bool DS_Dx12::Dispatch(ID3D12GraphicsCommandList* InCmdList, ID3D12Resource* InR
     DSConstants constants {};
     constants.DepthScale = Config::Instance()->FGDepthScaleMax.value_or_default();
 
-    if (!CreateConstantsBuffer(_device, _constantBuffer, constants, currentHeap.GetCbvCPU(0)))
+    if (!CreateConstantsBuffer(_device, currentHeap, constants, currentHeap.GetCbvCPU(0)))
     {
         LOG_ERROR("[{0}] Failed to create a constants buffer", _name);
         return false;
@@ -105,19 +106,6 @@ DS_Dx12::DS_Dx12(std::string InName, ID3D12Device* InDevice) : Shader_Dx12(InNam
         return;
     }
 
-    D3D12_RESOURCE_DESC desc = CD3DX12_RESOURCE_DESC::Buffer(sizeof(DSConstants));
-    auto heapProps = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
-
-    auto result =
-        InDevice->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ,
-                                          nullptr, IID_PPV_ARGS(&_constantBuffer));
-
-    if (result != S_OK)
-    {
-        LOG_ERROR("[{0}] CreateCommittedResource error {1:x}", _name, (unsigned int) result);
-        return;
-    }
-
     if (!CreateComputePipeline(InDevice, &_pipelineState, DS_cso, sizeof(DS_cso), shaderCode.c_str()))
     {
         LOG_ERROR("[{0}] Failed to create compute pipeline", _name);
@@ -129,7 +117,7 @@ DS_Dx12::DS_Dx12(std::string InName, ID3D12Device* InDevice) : Shader_Dx12(InNam
 
 DS_Dx12::~DS_Dx12()
 {
-    if (!_init || State::Instance().isShuttingDown)
+    if (State::Instance().isShuttingDown)
         return;
 
     for (int i = 0; i < DS_NUM_OF_HEAPS; i++)
@@ -137,5 +125,5 @@ DS_Dx12::~DS_Dx12()
         _frameHeaps[i].ReleaseHeaps();
     }
 
-    SAFE_RELEASE(_buffer);
+    DeferredRelease::Release(_buffer);
 }

@@ -6,6 +6,18 @@
 #include <Config.h>
 
 #include <framegen/IFGFeature_Dx12.h>
+#include <resource_tracking/ResTrack_dx12.h>
+#include <misc/DeferredRelease.h>
+
+namespace
+{
+struct ScopedBoolFlag
+{
+    bool& flag;
+    explicit ScopedBoolFlag(bool& value) : flag(value) { flag = true; }
+    ~ScopedBoolFlag() { flag = false; }
+};
+} // namespace
 
 inline static int GetFormatGroup(DXGI_FORMAT format)
 {
@@ -79,76 +91,34 @@ inline static bool CompareResourceFormats(DXGI_FORMAT sc, DXGI_FORMAT hudless)
 
     auto scGroup = GetFormatGroup(sc);
     auto hudlessGroup = GetFormatGroup(hudless);
-    return scGroup == hudlessGroup;
+    return scGroup >= 0 && scGroup == hudlessGroup;
 }
 
-bool Hudfix_Dx12::CreateObjects()
+void Hudfix_Dx12::RemoveCaptureBuffer(ID3D12Resource** resource)
 {
-    if (_commandQueue != nullptr)
-        return true;
+    if (resource == nullptr || *resource == nullptr)
+        return;
 
-    do
+    LOG_DEBUG("Capture buffer removed: {:X}", (size_t) *resource);
+
+    // FG can still be reading it
+    DeferredRelease::Release(*resource);
+}
+
+void Hudfix_Dx12::ReleaseBuffers()
+{
+    std::unique_lock<std::mutex> checkLock(_checkMutex, std::defer_lock);
+    if (!_checkMutexOwned)
+        checkLock.lock();
+
+    for (int i = 0; i < BUFFER_COUNT; i++)
     {
-        HRESULT result;
+        RemoveCaptureBuffer(&_captureBuffer[i]);
 
-        for (size_t i = 0; i < BUFFER_COUNT; i++)
-        {
-            result = State::Instance().currentD3D12Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
-                                                                                  IID_PPV_ARGS(&_commandAllocator[i]));
-            if (result != S_OK)
-            {
-                LOG_ERROR("CreateCommandAllocator: {:X}", (unsigned long) result);
-                break;
-            }
-            _commandAllocator[i]->SetName(L"Hudfix CommandAllocator");
-
-            result = State::Instance().currentD3D12Device->CreateCommandList(
-                0, D3D12_COMMAND_LIST_TYPE_DIRECT, _commandAllocator[i], NULL, IID_PPV_ARGS(&_commandList[i]));
-            if (result != S_OK)
-            {
-                LOG_ERROR("CreateCommandList: {:X}", (unsigned long) result);
-                break;
-            }
-
-            _commandList[i]->SetName(L"Hudfix CommandList");
-
-            result = _commandList[i]->Close();
-            if (result != S_OK)
-            {
-                LOG_ERROR("_hudlessCommandList->Close: {:X}", (unsigned long) result);
-                break;
-            }
-
-            result =
-                State::Instance().currentD3D12Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_fence[i]));
-            if (result != S_OK)
-            {
-                LOG_ERROR("CreateFence: {0:X}", (unsigned long) result);
-                break;
-            }
-        }
-
-        // Create a command queue for frame generation
-        D3D12_COMMAND_QUEUE_DESC queueDesc = {};
-        queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-        queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
-        queueDesc.NodeMask = 0;
-        queueDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
-
-        HRESULT hr = State::Instance().currentD3D12Device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&_commandQueue));
-        if (hr != S_OK)
-        {
-            LOG_ERROR("CreateCommandQueue: {:X}", (unsigned long) hr);
-            break;
-        }
-
-        _commandQueue->SetName(L"Hudfix CommandQueue");
-
-        return true;
-
-    } while (false);
-
-    return false;
+        // Its destructor defers the release of its buffer
+        delete _formatTransfer[i];
+        _formatTransfer[i] = nullptr;
+    }
 }
 
 bool Hudfix_Dx12::CreateBufferResource(ID3D12Device* InDevice, ResourceInfo* InSource, D3D12_RESOURCE_STATES InState,
@@ -164,11 +134,8 @@ bool Hudfix_Dx12::CreateBufferResource(ID3D12Device* InDevice, ResourceInfo* InS
         if (bufDesc.Width != (UINT64) (InSource->width) || bufDesc.Height != (UINT) (InSource->height) ||
             bufDesc.Format != InSource->format)
         {
-            // Maybe need to add a fence here
-            // To be sure it's not used anymore
-            (*OutResource)->Release();
-            (*OutResource) = nullptr;
-            LOG_WARN("Release {}x{}, new one: {}x{}", bufDesc.Width, bufDesc.Height, InSource->width, InSource->height);
+            RemoveCaptureBuffer(OutResource);
+            LOG_WARN("Remove {}x{}, new one: {}x{}", bufDesc.Width, bufDesc.Height, InSource->width, InSource->height);
         }
         else
         {
@@ -215,9 +182,8 @@ bool Hudfix_Dx12::CreateBufferResourceWithSize(ID3D12Device* InDevice, ResourceI
 
         if (bufDesc.Width != (UINT64) InWidth || bufDesc.Height != InHeight || bufDesc.Format != InSource->format)
         {
-            (*OutResource)->Release();
-            (*OutResource) = nullptr;
-            LOG_WARN("Release {}x{}, new one: {}x{}", bufDesc.Width, bufDesc.Height, InWidth, InHeight);
+            RemoveCaptureBuffer(OutResource);
+            LOG_WARN("Remove {}x{}, new one: {}x{}", bufDesc.Width, bufDesc.Height, InWidth, InHeight);
         }
         else
         {
@@ -269,10 +235,8 @@ void Hudfix_Dx12::ResourceBarrier(ID3D12GraphicsCommandList* InCommandList, ID3D
     InCommandList->ResourceBarrier(1, &barrier);
 }
 
-bool Hudfix_Dx12::CheckCapture()
+bool Hudfix_Dx12::CheckCapture(int fIndex)
 {
-    auto fIndex = GetIndex();
-
     {
         std::lock_guard<std::mutex> lock(_counterMutex);
 
@@ -284,8 +248,8 @@ bool Hudfix_Dx12::CheckCapture()
 
         _captureCounter[fIndex]++;
 
-        LOG_TRACE("frameCounter: {}, _captureCounter: {}, Limit: {}", State::Instance().currentFeature->FrameCount(),
-                  _captureCounter[fIndex], Config::Instance()->FGHUDLimit.value_or_default());
+        LOG_TRACE("_captureCounter: {}, Limit: {}", _captureCounter[fIndex],
+                  Config::Instance()->FGHUDLimit.value_or_default());
 
         if (_captureCounter[fIndex] < Config::Instance()->FGHUDLimit.value_or_default())
             return false;
@@ -342,8 +306,8 @@ bool Hudfix_Dx12::CheckResource(ResourceInfo* resource)
 
     if (State::Instance().fgOnlyUseCapturedResources)
     {
-        auto result = _captureList.find(resource->buffer) != _captureList.end();
-        return result;
+        std::lock_guard<std::mutex> lock(_captureMutex);
+        return _captureList.find(resource->buffer) != _captureList.end();
     }
 
     auto& s = State::Instance();
@@ -358,8 +322,11 @@ bool Hudfix_Dx12::CheckResource(ResourceInfo* resource)
         return false;
     }
 
-    // Get resource info
-    auto resDesc = resource->buffer->GetDesc();
+    D3D12_RESOURCE_DESC resDesc = {};
+    resDesc.Width = resource->width;
+    resDesc.Height = resource->height;
+    resDesc.Format = resource->format;
+    resDesc.Flags = resource->flags;
 
     // dimensions not match
     uint32_t width = s.currentSwapchainDesc.BufferDesc.Width;
@@ -367,8 +334,8 @@ bool Hudfix_Dx12::CheckResource(ResourceInfo* resource)
 
     if (resDesc.Height != height || resDesc.Width != width)
     {
-        auto toleranceX = width / 8;
-        auto toleranceY = height / 8;
+        auto toleranceX = width / 20;
+        auto toleranceY = height / 20;
 
         // Extended size check
         if (resource->captureInfo != CaptureInfo::Upscaler &&
@@ -439,15 +406,13 @@ bool Hudfix_Dx12::CheckResource(ResourceInfo* resource)
     // return false;
 }
 
-int Hudfix_Dx12::GetIndex() { return _upscaleCounter % BUFFER_COUNT; }
-
-void Hudfix_Dx12::HudlessFound(ID3D12GraphicsCommandList* cmdList)
+void Hudfix_Dx12::HudlessFound(UINT64 upscaleCounter)
 {
-    LOG_DEBUG("_upscaleCounter: {}, _fgCounter: {}", _upscaleCounter, _fgCounter);
+    LOG_DEBUG("_upscaleCounter: {}, _fgCounter: {}", upscaleCounter, _fgCounter.load(std::memory_order_acquire));
 
     std::lock_guard<std::mutex> lock(_counterMutex);
 
-    auto index = GetIndex();
+    const auto index = static_cast<int>(upscaleCounter % BUFFER_COUNT);
     if (_captureCounter[index] > 1000)
         return;
 
@@ -455,9 +420,9 @@ void Hudfix_Dx12::HudlessFound(ID3D12GraphicsCommandList* cmdList)
     _captureCounter[index] = 9999;
 
     // Increase counter
-    _fgCounter = _upscaleCounter;
+    _fgCounter.store(upscaleCounter, std::memory_order_release);
 
-    _skipHudlessChecks = false;
+    _skipHudlessChecks.store(false, std::memory_order_release);
 }
 
 void Hudfix_Dx12::UpscaleStart()
@@ -473,36 +438,47 @@ void Hudfix_Dx12::UpscaleStart()
 
     if (State::Instance().clearCapturedHudlesses)
     {
+        std::lock_guard<std::mutex> lock(_checkMutex);
+
         LOG_DEBUG("ClearCapturedHudlesses");
         State::Instance().clearCapturedHudlesses = false;
+
+        std::scoped_lock hudlessLock(State::Instance().capturedHudlessesMutex);
         State::Instance().capturedHudlesses.clear();
     }
 }
 
 void Hudfix_Dx12::UpscaleEnd(UINT64 frameId, double lastFGFrameTime)
 {
+    std::lock_guard<std::mutex> checkLock(_checkMutex);
+    std::lock_guard<std::mutex> counterLock(_counterMutex);
 
     // Update counter after upscaling so _upscaleCounter == _fgCounter check at IsResourceCheckActive will work
-    _upscaleCounter++; // = frameId;
+    const auto nextUpscaleCounter = _upscaleCounter.load(std::memory_order_relaxed) + 1; // = frameId;
     _frameTime = lastFGFrameTime;
 
-    // Get new index and clear resources
-    auto index = GetIndex();
+    // Reset the target slot before publishing the new frame number to tracking threads.
+    const auto index = static_cast<int>(nextUpscaleCounter % BUFFER_COUNT);
     _captureCounter[index] = 0;
-    _skipHudlessChecks = false;
+    _skipHudlessChecks.store(false, std::memory_order_release);
+    _upscaleCounter.store(nextUpscaleCounter, std::memory_order_release);
 }
 
-void Hudfix_Dx12::PresentStart() { _fgCounter = _upscaleCounter; }
+void Hudfix_Dx12::PresentStart()
+{
+    std::lock_guard<std::mutex> checkLock(_checkMutex);
+    _fgCounter.store(_upscaleCounter.load(std::memory_order_acquire), std::memory_order_release);
+}
 
 void Hudfix_Dx12::PresentEnd() { LOG_DEBUG(""); }
 
-UINT64 Hudfix_Dx12::ActiveUpscaleFrame() { return _upscaleCounter; }
+UINT64 Hudfix_Dx12::ActiveUpscaleFrame() { return _upscaleCounter.load(std::memory_order_acquire); }
 
-UINT64 Hudfix_Dx12::ActivePresentFrame() { return _fgCounter; }
+UINT64 Hudfix_Dx12::ActivePresentFrame() { return _fgCounter.load(std::memory_order_acquire); }
 
 bool Hudfix_Dx12::IsResourceCheckActive()
 {
-    if (_skipTracking)
+    if (_skipTracking.load(std::memory_order_acquire))
     {
         // LOG_TRACK("_skipHudlessChecks");
         return false;
@@ -514,16 +490,19 @@ bool Hudfix_Dx12::IsResourceCheckActive()
         return false;
     }
 
-    if (_upscaleCounter <= _fgCounter)
+    const auto upscaleCounter = _upscaleCounter.load(std::memory_order_acquire);
+    const auto fgCounter = _fgCounter.load(std::memory_order_acquire);
+
+    if (upscaleCounter <= fgCounter)
     {
         // LOG_TRACK("_upscaleCounter <= _fgCounter: {} <= {}", _upscaleCounter, _fgCounter);
         return false;
     }
 
-    if (!Config::Instance()->FGEnabled.value_or_default() || !Config::Instance()->FGHUDFix.value_or_default())
+    if (!Config::Instance()->IsFGEnabled() || !Config::Instance()->FGHUDFix.value_or_default())
     {
         // LOG_TRACK(
-        //     "!Config::Instance()->FGEnabled.value_or_default() || !Config::Instance()->FGHUDFix.value_or_default()");
+        //     "!Config::Instance()->IsFGEnabled() || !Config::Instance()->FGHUDFix.value_or_default()");
         return false;
     }
 
@@ -542,7 +521,28 @@ bool Hudfix_Dx12::IsResourceCheckActive()
     return true;
 }
 
-bool Hudfix_Dx12::SkipHudlessChecks() { return _skipHudlessChecks; }
+bool Hudfix_Dx12::SkipHudlessChecks() { return _skipHudlessChecks.load(std::memory_order_acquire); }
+
+void Hudfix_Dx12::RemoveResourceFromTracking(ID3D12Resource* resource)
+{
+    if (resource == nullptr)
+        return;
+
+    std::unique_lock<std::mutex> checkLock(_checkMutex, std::defer_lock);
+    if (!_checkMutexOwned)
+        checkLock.lock();
+
+    std::lock_guard<std::mutex> captureLock(_captureMutex);
+
+    _hudlessList.erase(resource);
+
+    {
+        std::scoped_lock hudlessLock(State::Instance().capturedHudlessesMutex);
+        State::Instance().capturedHudlesses.erase(resource);
+    }
+    _captureList.erase(resource);
+    State::Instance().fgCapturedResourceCount = _captureList.size();
+}
 
 bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceInfo* resource,
                                   D3D12_RESOURCE_STATES state, bool ignoreBlocked)
@@ -555,6 +555,10 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
     if (!IsResourceCheckActive())
         return false;
 
+    // Barriers and copies aren't allowed in bundles
+    if (cmdList->GetType() == D3D12_COMMAND_LIST_TYPE_BUNDLE)
+        return false;
+
     do
     {
         if (!CheckResource(resource))
@@ -563,51 +567,84 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
             break;
         }
 
-        CapturedHudlessInfo* capturedHudlessInfo = nullptr;
-        auto it = s.capturedHudlesses.find(resource->buffer);
-        if (it != s.capturedHudlesses.end())
-        {
-            capturedHudlessInfo = &it->second;
+        LOG_DEBUG("Waiting _checkMutex");
+        std::lock_guard<std::mutex> lock(_checkMutex);
+        ScopedBoolFlag checkOwnership(_checkMutexOwned);
 
-            if (!capturedHudlessInfo->enabled)
-            {
-                LOG_DEBUG("Skipping {:X}, disabled from captured hudless list!", (size_t) resource->buffer);
+        // Destroyed since it was looked up, a destruction from now on waits for _checkMutex
+        if (resource->lifetimeTracked)
+        {
+            std::lock_guard trackedLock(_trackedResourcesMutex);
+
+            if (!_trackedResources.contains(resource->buffer))
                 break;
+        }
+
+        const auto upscaleCounter = _upscaleCounter.load(std::memory_order_acquire);
+        if (upscaleCounter <= _fgCounter.load(std::memory_order_acquire))
+            break;
+
+        const auto fIndex = static_cast<int>(upscaleCounter % BUFFER_COUNT);
+
+        CapturedHudlessInfo* capturedHudlessInfo = nullptr;
+        {
+            std::scoped_lock hudlessLock(State::Instance().capturedHudlessesMutex);
+
+            auto it = s.capturedHudlesses.find(resource->buffer);
+            if (it != s.capturedHudlesses.end())
+            {
+                capturedHudlessInfo = &it->second;
+                resource->lifetimeTracked = true;
+
+                if (!capturedHudlessInfo->enabled)
+                {
+                    LOG_DEBUG("Skipping {:X}, disabled from captured hudless list!", (size_t) resource->buffer);
+                    break;
+                }
             }
         }
 
-        // Prevent double capture
-        LOG_DEBUG("Waiting _checkMutex");
-        std::lock_guard<std::mutex> lock(_checkMutex);
+        auto ensureResourceTracked = [&]() -> bool
+        {
+            if (resource->lifetimeTracked)
+                return true;
+
+            if (!ResTrack_Dx12::TrackResourceRelease(resource->buffer))
+                return false;
+
+            resource->lifetimeTracked = true;
+            return true;
+        };
 
         if (!ignoreBlocked && Config::Instance()->FGResourceBlocking.value_or_default())
         {
             if (_hudlessList.contains(resource->buffer))
             {
+                resource->lifetimeTracked = true;
                 auto info = &_hudlessList[resource->buffer];
 
                 // if game starts reusing the ignored resource & it's not banned
                 if (info->ignore && !info->dontReuse)
                 {
                     // check resource once per frame
-                    if (info->lastTriedFrame != _upscaleCounter)
+                    if (info->lastTriedFrame != upscaleCounter)
                     {
                         // start retry period
                         if (info->retryStartFrame == 0)
                         {
                             LOG_WARN("Retry for {:X} as hudless, current frame: {}", (size_t) resource->buffer,
-                                     _upscaleCounter);
-                            info->retryStartFrame = _upscaleCounter;
-                            info->lastTriedFrame = _upscaleCounter;
+                                     upscaleCounter);
+                            info->retryStartFrame = upscaleCounter;
+                            info->lastTriedFrame = upscaleCounter;
                             info->retryCount = 0;
                             break;
                         }
 
                         info->retryCount++;
-                        info->lastTriedFrame = _upscaleCounter;
+                        info->lastTriedFrame = upscaleCounter;
 
                         // If still in retry period (70 frames)
-                        if ((_upscaleCounter - info->retryStartFrame) < 69)
+                        if ((upscaleCounter - info->retryStartFrame) < 69)
                         {
                             // and used at least 20 times (around every 3rd frame)
                             // try reusing the resource
@@ -615,10 +652,10 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
                             {
                                 LOG_WARN("Reusing {:X} as hudless, retry start frame: {}, current frame: {}, reuse "
                                          "count: {}",
-                                         (size_t) resource->buffer, info->retryStartFrame, _upscaleCounter,
+                                         (size_t) resource->buffer, info->retryStartFrame, upscaleCounter,
                                          info->retryCount);
 
-                                info->lastUsedFrame = _upscaleCounter;
+                                info->lastUsedFrame = upscaleCounter;
                                 info->retryStartFrame = 0;
                                 info->useCount = 0;
                                 info->retryCount = 0;
@@ -631,7 +668,7 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
                             // Retry period ended without success, reset values
 
                             LOG_WARN("Retry failed for {:X} as hudless, current frame: {}", (size_t) resource->buffer,
-                                     _upscaleCounter);
+                                     upscaleCounter);
 
                             info->useCount = 0;
                             info->retryCount = 0;
@@ -645,16 +682,16 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
                     break;
 
                 // if buffer is not used in last 5 frames stop using it
-                if ((_upscaleCounter - info->lastUsedFrame) > 6 && info->useCount < 100)
+                if ((upscaleCounter - info->lastUsedFrame) > 6 && info->useCount < 100)
                 {
                     LOG_WARN("Blocked {:X} as hudless, last used frame: {}, current frame: {}, use count: {}",
-                             (size_t) resource->buffer, info->lastUsedFrame, _upscaleCounter, info->useCount);
+                             (size_t) resource->buffer, info->lastUsedFrame, upscaleCounter, info->useCount);
 
                     info->ignore = true;
                     info->retryCount = 0;
                     info->lastTriedFrame = 0;
                     info->retryStartFrame = 0;
-                    info->lastUsedFrame = _upscaleCounter;
+                    info->lastUsedFrame = upscaleCounter;
 
                     // don't reuse more than 2 times
                     if (info->reuseCount > 1)
@@ -664,27 +701,31 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
                 }
 
                 // update the info
-                info->lastUsedFrame = _upscaleCounter;
+                info->lastUsedFrame = upscaleCounter;
                 info->useCount++;
             }
             else
             {
-                _hudlessList[resource->buffer] = { _upscaleCounter, 0, 0, 0, 0, 1, false, false };
+                if (!ensureResourceTracked())
+                {
+                    LOG_DEBUG("Can't track lifetime of HUDless candidate {:X}", (size_t) resource->buffer);
+                    break;
+                }
+
+                _hudlessList[resource->buffer] = { upscaleCounter, 0, 0, 0, 0, 1, false, false };
             }
         }
 
-        if (!CheckCapture())
+        if (!CheckCapture(fIndex))
             break;
 
-        auto fIndex = GetIndex();
+        if (!ensureResourceTracked())
+        {
+            LOG_DEBUG("Can't track lifetime of HUDless resource {:X}", (size_t) resource->buffer);
+            break;
+        }
 
         LOG_TRACE("Capture resource: {:X}, index: {}", (size_t) resource->buffer, fIndex);
-
-        if (_commandQueue == nullptr && !CreateObjects())
-        {
-            LOG_WARN("Can't create command queue!");
-            return false;
-        }
 
         auto scWidth = s.currentSwapchainDesc.BufferDesc.Width;
         auto scHeight = s.currentSwapchainDesc.BufferDesc.Height;
@@ -699,13 +740,13 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
 
                 // Using state D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE as skip flag
                 if (state != D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE)
-                    ResourceBarrier(cmdList, resource->buffer, resource->state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    ResourceBarrier(cmdList, resource->buffer, state, D3D12_RESOURCE_STATE_COPY_SOURCE);
 
                 cmdList->CopyResource(_captureBuffer[fIndex], resource->buffer);
 
                 // Using state D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE as skip flag
                 if (state != D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE)
-                    ResourceBarrier(cmdList, resource->buffer, D3D12_RESOURCE_STATE_COPY_SOURCE, resource->state);
+                    ResourceBarrier(cmdList, resource->buffer, D3D12_RESOURCE_STATE_COPY_SOURCE, state);
 
                 LOG_DEBUG("Copy created");
             }
@@ -744,22 +785,14 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
                 srcBox.front = 0;
                 srcBox.back = 1;
 
-                if (scWidth > resource->width || scHeight > resource->height)
-                {
-                    srcBox.right = static_cast<UINT>(resource->width);
-                    srcBox.bottom = resource->height;
-                    UINT top = (scHeight - resource->height) / 2;
-                    UINT left = static_cast<UINT>((scWidth - resource->width) / 2);
+                const UINT copyWidth = static_cast<UINT>(resource->width < scWidth ? resource->width : scWidth);
+                const UINT copyHeight = resource->height < scHeight ? resource->height : scHeight;
+                srcBox.right = copyWidth;
+                srcBox.bottom = copyHeight;
 
-                    cmdList->CopyTextureRegion(&dstLocation, left, top, 0, &srcLocation, &srcBox);
-                }
-                else
-                {
-                    srcBox.right = scWidth;
-                    srcBox.bottom = scHeight;
-
-                    cmdList->CopyTextureRegion(&dstLocation, 0, 0, 0, &srcLocation, &srcBox);
-                }
+                const UINT left = (scWidth - copyWidth) / 2;
+                const UINT top = (scHeight - copyHeight) / 2;
+                cmdList->CopyTextureRegion(&dstLocation, left, top, 0, &srcLocation, &srcBox);
 
                 // Using state D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE as skip flag
                 if (state != D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE)
@@ -784,8 +817,7 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
             {
                 LOG_DEBUG("Format change, recreate the FormatTransfer");
 
-                if (_formatTransfer[fIndex] != nullptr)
-                    delete _formatTransfer[fIndex];
+                delete _formatTransfer[fIndex];
 
                 _formatTransfer[fIndex] = nullptr;
 
@@ -811,17 +843,28 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
 
                 auto fgCmdList = s.currentFG->GetUICommandList();
 
+                if (fgCmdList == nullptr)
+                    break;
+
                 // This will prevent resource tracker to check these operations
                 // Will reset after FG dispatch
-                _skipHudlessChecks = true;
+                _skipHudlessChecks.store(true, std::memory_order_release);
 
                 ResourceBarrier(fgCmdList, _captureBuffer[fIndex], D3D12_RESOURCE_STATE_COPY_DEST,
                                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
-                _formatTransfer[fIndex]->Dispatch(fgCmdList, _captureBuffer[fIndex], _formatTransfer[fIndex]->Buffer());
+                const bool dispatched = _formatTransfer[fIndex]->Dispatch(fgCmdList, _captureBuffer[fIndex],
+                                                                          _formatTransfer[fIndex]->Buffer());
 
                 ResourceBarrier(fgCmdList, _captureBuffer[fIndex], D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                                 D3D12_RESOURCE_STATE_COPY_DEST);
+
+                // FG would get last frame's buffer
+                if (!dispatched)
+                {
+                    _skipHudlessChecks.store(false, std::memory_order_release);
+                    break;
+                }
 
                 LOG_TRACE("Using _formatTransfer->Buffer()");
 
@@ -836,7 +879,7 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
                     setResource.width = s.currentSwapchainDesc.BufferDesc.Width;
                     setResource.height = s.currentSwapchainDesc.BufferDesc.Height;
                     setResource.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-                    setResource.validity = FG_ResourceValidity::JustTrackCmdlist;
+                    setResource.validity = FG_ResourceValidity::UntilPresent;
                     setResource.frameIndex = fg->GetIndexWillBeDispatched();
 
                     fg->SetResource(&setResource);
@@ -852,7 +895,7 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
         {
             // This will prevent resource tracker to check these operations
             // Will reset after FG dispatch
-            _skipHudlessChecks = true;
+            _skipHudlessChecks.store(true, std::memory_order_release);
             LOG_DEBUG("Using _captureBuffer");
 
             if (fg != nullptr)
@@ -866,7 +909,7 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
                 setResource.width = s.currentSwapchainDesc.BufferDesc.Width;
                 setResource.height = s.currentSwapchainDesc.BufferDesc.Height;
                 setResource.state = D3D12_RESOURCE_STATE_COPY_DEST;
-                setResource.validity = FG_ResourceValidity::JustTrackCmdlist;
+                setResource.validity = FG_ResourceValidity::UntilPresent;
                 setResource.frameIndex = fg->GetIndexWillBeDispatched();
 
                 fg->SetResource(&setResource);
@@ -884,8 +927,10 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
 
         // This will prevent resource tracker to check these operations
         // Will reset after FG dispatch
-        _skipHudlessChecks = true;
-        HudlessFound(cmdList);
+        _skipHudlessChecks.store(true, std::memory_order_release);
+        HudlessFound(upscaleCounter);
+
+        std::scoped_lock hudlessLock(State::Instance().capturedHudlessesMutex);
 
         if (capturedHudlessInfo != nullptr)
         {
@@ -911,8 +956,11 @@ bool Hudfix_Dx12::CheckForHudless(ID3D12GraphicsCommandList* cmdList, ResourceIn
 
 void Hudfix_Dx12::ResetCounters()
 {
-    _fgCounter = 0;
-    _upscaleCounter = 0;
+    std::lock_guard<std::mutex> checkLock(_checkMutex);
+    std::lock_guard<std::mutex> counterLock(_counterMutex);
+
+    _fgCounter.store(0, std::memory_order_release);
+    _upscaleCounter.store(0, std::memory_order_release);
 
     _lastDiffTime = 0.0;
     _upscaleEndTime = 0.0;

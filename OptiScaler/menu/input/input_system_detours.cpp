@@ -1,8 +1,12 @@
 #include "pch.h"
 #include "input_system_internal.h"
 
+#include <hooks/Kernel_Hooks.h>
+
 #include <detours/detours.h>
 
+#include <array>
+#include <atomic>
 #include <tlhelp32.h>
 #include <vector>
 #include <string_view>
@@ -22,14 +26,37 @@ static bool positionIATHooks = false;
 
 namespace OptiInput
 {
+// The "pressed since the last call" bit Opti's own polling took from the game, handed back on its next call
+static std::array<std::atomic_bool, 256> asyncKeyPressTaken {};
+
 SHORT RealGetAsyncKeyStateSafe(int vk)
 {
     ScopedHookBypass bypass;
 
-    if (o_GetAsyncKeyState != nullptr)
-        return o_GetAsyncKeyState(vk);
+    const SHORT state = o_GetAsyncKeyState != nullptr ? o_GetAsyncKeyState(vk) : ::GetAsyncKeyState(vk);
 
-    return ::GetAsyncKeyState(vk);
+    if ((state & 1) != 0 && vk >= 0 && vk < static_cast<int>(asyncKeyPressTaken.size()))
+        asyncKeyPressTaken[vk] = true;
+
+    return state;
+}
+
+void ForgetTakenAsyncKeyPresses()
+{
+    for (auto& taken : asyncKeyPressTaken)
+        taken = false;
+}
+
+SHORT WithTakenAsyncKeyPress(int vk, SHORT state, bool blocked)
+{
+    if (vk < 0 || vk >= static_cast<int>(asyncKeyPressTaken.size()))
+        return state;
+
+    // A press while blocked belongs to the menu
+    if (asyncKeyPressTaken[vk].exchange(false) && !blocked)
+        state |= 1;
+
+    return state;
 }
 
 SHORT RealGetKeyStateSafe(int vk)
@@ -246,14 +273,14 @@ void ResolveOptionalUser32Exports()
 
     if (o_GetPhysicalCursorPos == nullptr)
     {
-        o_GetPhysicalCursorPos =
-            reinterpret_cast<GetPhysicalCursorPos_t>(GetProcAddress(user32, "GetPhysicalCursorPos"));
+        o_GetPhysicalCursorPos = reinterpret_cast<GetPhysicalCursorPos_t>(
+            KernelBaseProxy::GetProcAddress_()(user32, "GetPhysicalCursorPos"));
     }
 
     if (o_SetPhysicalCursorPos == nullptr)
     {
-        o_SetPhysicalCursorPos =
-            reinterpret_cast<SetPhysicalCursorPos_t>(GetProcAddress(user32, "SetPhysicalCursorPos"));
+        o_SetPhysicalCursorPos = reinterpret_cast<SetPhysicalCursorPos_t>(
+            KernelBaseProxy::GetProcAddress_()(user32, "SetPhysicalCursorPos"));
     }
 }
 } // namespace

@@ -6,8 +6,10 @@
 
 #include <set>
 #include <dxgi.h>
+#include <atomic>
 #include <d3d12.h>
 #include <shared_mutex>
+#include <vector>
 
 enum ResourceType
 {
@@ -42,6 +44,7 @@ typedef struct ResourceInfo
     ResourceType type = SRV;
     double lastUsedFrame = 0;
     bool extended = false;
+    bool lifetimeTracked = false;
     UINT captureInfo = 0;
 } resource_info;
 
@@ -61,10 +64,10 @@ class Hudfix_Dx12
 {
   private:
     // Last upscaled frame
-    inline static UINT64 _upscaleCounter = 0;
+    inline static std::atomic<UINT64> _upscaleCounter { 0 };
 
     // Last presented frame
-    inline static UINT64 _fgCounter = 0;
+    inline static std::atomic<UINT64> _fgCounter { 0 };
 
     // Limit until calling FG without hudless
     inline static double _lastDiffTime = 0.0;
@@ -72,7 +75,7 @@ class Hudfix_Dx12
     inline static double _targetTime = 0.0;
     inline static double _frameTime = 0.0;
 
-    inline static bool _skipTracking = false;
+    inline static std::atomic<bool> _skipTracking { false };
 
     // Buffer for Format Transfer
     inline static ID3D12Resource* _captureBuffer[BUFFER_COUNT] = { nullptr, nullptr, nullptr, nullptr };
@@ -86,17 +89,14 @@ class Hudfix_Dx12
     inline static std::mutex _checkMutex;
     inline static std::mutex _captureMutex;
     inline static std::mutex _counterMutex;
+    inline static thread_local bool _checkMutexOwned = false;
     inline static INT64 _captureCounter[BUFFER_COUNT] = { 0, 0, 0, 0 };
     inline static FT_Dx12* _formatTransfer[BUFFER_COUNT] = { nullptr, nullptr, nullptr, nullptr };
 
-    inline static ID3D12CommandQueue* _commandQueue = nullptr;
-    inline static ID3D12GraphicsCommandList* _commandList[BUFFER_COUNT] = { nullptr, nullptr, nullptr, nullptr };
-    inline static ID3D12CommandAllocator* _commandAllocator[BUFFER_COUNT] = { nullptr, nullptr, nullptr, nullptr };
-    inline static ID3D12Fence* _fence[BUFFER_COUNT] = { nullptr, nullptr, nullptr, nullptr };
+    inline static std::atomic<bool> _skipHudlessChecks { false };
 
-    inline static bool _skipHudlessChecks = false;
+    static void RemoveCaptureBuffer(ID3D12Resource** resource);
 
-    static bool CreateObjects();
     static bool CreateBufferResource(ID3D12Device* InDevice, ResourceInfo* InSource, D3D12_RESOURCE_STATES InState,
                                      ID3D12Resource** OutResource);
     static bool CreateBufferResourceWithSize(ID3D12Device* InDevice, ResourceInfo* InSource,
@@ -106,11 +106,9 @@ class Hudfix_Dx12
                                 D3D12_RESOURCE_STATES InBeforeState, D3D12_RESOURCE_STATES InAfterState);
 
     // Check _captureCounter for current frame
-    static bool CheckCapture();
+    static bool CheckCapture(int fIndex);
 
-    static void HudlessFound(ID3D12GraphicsCommandList* cmdList);
-
-    static int GetIndex();
+    static void HudlessFound(UINT64 upscaleCounter);
 
   public:
     // Trig for upscaling start
@@ -140,9 +138,14 @@ class Hudfix_Dx12
 
     static bool CheckResource(ResourceInfo* resource);
 
+    static void RemoveResourceFromTracking(ID3D12Resource* resource);
+
     // Reset frame counters
     static void ResetCounters();
 
-    static bool GetSkipStatus() { return _skipTracking; }
-    static void SetSkipStatus(bool status) { _skipTracking = status; }
+    // Frees the capture and format transfer buffers, recreated on the next capture
+    static void ReleaseBuffers();
+
+    static bool GetSkipStatus() { return _skipTracking.load(std::memory_order_acquire); }
+    static void SetSkipStatus(bool status) { _skipTracking.store(status, std::memory_order_release); }
 };

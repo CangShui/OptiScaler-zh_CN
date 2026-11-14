@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "SysUtils.h"
 
 #include <proxies/Kernel32_Proxy.h>
@@ -67,7 +67,7 @@ class KernelHooks
     static inline std::mutex hookMutexBase;
 
   public:
-    static inline HMODULE amdxc64Mark = HMODULE(0xFFFFFFFF13372137);
+    static constexpr HMODULE amdxc64Mark = HMODULE(0xFFFFFFFF13372137);
 
     static void Hook()
     {
@@ -84,10 +84,8 @@ class KernelHooks
         if (o_K32_GetModuleHandleW == nullptr)
             o_K32_GetModuleHandleW = Kernel32Proxy::Hook_GetModuleHandleW(hk_K32_GetModuleHandleW);
 
-#ifdef LOW_LATENCY_INPUTS
         if (o_K32_GetModuleHandleExA == nullptr)
             o_K32_GetModuleHandleExA = Kernel32Proxy::Hook_GetModuleHandleExA(hk_K32_GetModuleHandleExA);
-#endif
 
         if (o_K32_GetModuleHandleExW == nullptr)
             o_K32_GetModuleHandleExW = Kernel32Proxy::Hook_GetModuleHandleExW(hk_K32_GetModuleHandleExW);

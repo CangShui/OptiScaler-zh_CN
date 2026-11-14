@@ -1,4 +1,5 @@
 #pragma once
+#include "HudCopy_Common.h"
 
 #include "SysUtils.h"
 
@@ -8,16 +9,11 @@
 #include <shaders/Shader_Dx12Utils.h>
 #include <shaders/Shader_Dx12.h>
 
-#define HudCopy_NUM_OF_HEAPS 2
+#define HudCopy_NUM_OF_HEAPS 3
 
-class HudCopy_Dx12 : public Shader_Dx12
+class HudCopy_Dx12 : public Shader_Dx12, public HudCopy_Common
 {
   private:
-    struct alignas(256) InternalCompareParams
-    {
-        float DiffThreshold = 0.02f;
-    };
-
     FrameDescriptorHeap _frameHeaps[HudCopy_NUM_OF_HEAPS];
 
     ID3D12Resource* _buffer = nullptr;

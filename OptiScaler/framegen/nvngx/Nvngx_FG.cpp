@@ -3,7 +3,7 @@
 #include <NVNGX_Parameter.h>
 #include "Nvngx_FG.h"
 
-#include "proxies/NVNGX_Proxy.h"
+#include "proxies/Nvngx_Proxy.h"
 #include "proxies/Ntdll_Proxy.h"
 
 #include "IFGNvngx.h"
@@ -11,7 +11,10 @@
 #include "Nvngx_Arturs.h"
 #include "Nvngx_FFX.h"
 #include "Nvngx_Combo.h"
+#include "Nvngx_Custom.h"
+#include "NvngxVkLayouts.h"
 #include <imgui/ImGuiNotify.hpp>
+#include <nvsdk_ngx_vk.h>
 
 IFGNvngx* Nvngx_FG::getProvider()
 {
@@ -36,6 +39,10 @@ IFGNvngx* Nvngx_FG::getProvider()
 
     case FGNvngxReplacement::Combo:
         _provider = std::make_unique<Nvngx_Combo>();
+        break;
+
+    case FGNvngxReplacement::Custom:
+        _provider = std::make_unique<Nvngx_Custom>(State::Instance().activeFgNvngxCustom);
         break;
 
     case FGNvngxReplacement::None:
@@ -65,6 +72,8 @@ IFGNvngx* Nvngx_FG::getProvider()
                 return "Nukems";
             case FGNvngxReplacement::Combo:
                 return "Combo";
+            case FGNvngxReplacement::Custom:
+                return "Custom DLSSG";
             case FGNvngxReplacement::None:
             default:
                 return "???";
@@ -141,6 +150,32 @@ int Nvngx_FG::getMaxFakeFramesCount()
     return provider->getMaxFakeFramesCount();
 }
 
+// Streamline's DLSSG on Vulkan makes its swapchain with MultiFrameCountMax + 1 images and assumes the driver made
+// exactly that many, it never asks. A driver or layer can make more (an RX 6900 XT with the GamePP layer made 3 for
+// 2), its present crashes on an acquired image past Streamline's count. Its maximum of 6 images stays at or over the
+// minimum counts they enforce, the provider's own max still limits the generated frames.
+int Nvngx_FG::streamlineMaxFakeFramesCount(API api)
+{
+    constexpr int streamlineVkMax = 5;
+
+    const int providerMax = std::max(1, getMaxFakeFramesCount());
+
+    if (api == API::Vulkan)
+        return std::max(providerMax, streamlineVkMax);
+
+    return providerMax;
+}
+
+int Nvngx_FG::limitToProvider(int count)
+{
+    if (State::Instance().activeFgNvngx == FGNvngxReplacement::None)
+        return count;
+
+    const int providerMax = getMaxFakeFramesCount();
+
+    return providerMax > 0 ? std::min(count, providerMax) : count;
+}
+
 bool Nvngx_FG::isDx12Available()
 {
     auto* provider = getProvider();
@@ -179,6 +214,16 @@ feature_version Nvngx_FG::extraVersion()
         return {};
 
     return provider->extraVersion();
+}
+
+bool Nvngx_FG::supportsDispatchFlags()
+{
+    auto* provider = getProvider();
+
+    if (!provider)
+        return false;
+
+    return provider->supportsDispatchFlags();
 }
 
 void Nvngx_FG::setDebugView(bool enabled)
@@ -267,19 +312,32 @@ NVSDK_NGX_Result Nvngx_FG::D3D12_GetScratchBufferSize(NVSDK_NGX_Feature InFeatur
 NVSDK_NGX_Result Nvngx_FG::D3D12_CreateFeature(ID3D12GraphicsCommandList* InCmdList, NVSDK_NGX_Feature InFeatureID,
                                                NVSDK_NGX_Parameter* InParameters, NVSDK_NGX_Handle** OutHandle)
 {
+    if (!OutHandle)
+        return NVSDK_NGX_Result_FAIL_InvalidParameter;
+
+    // A failed create leaves no handle, its callers can check it
+    *OutHandle = nullptr;
+
     auto* provider = getProvider();
 
     if (!provider)
         return NVSDK_NGX_Result_Fail;
 
-    if (!OutHandle)
-        return NVSDK_NGX_Result_FAIL_InvalidParameter;
-
     auto proxyHandle = new Nvngx_FG_Handle(lastIdCreated++ + NVNGX_PROVIDER_ID_OFFSET);
 
-    std::scoped_lock lock(proxyHandle->handleMutex);
+    NVSDK_NGX_Result result;
 
-    auto result = provider->D3D12_CreateFeature(InCmdList, InFeatureID, InParameters, &proxyHandle->nativeHandle);
+    {
+        std::scoped_lock lock(proxyHandle->handleMutex);
+        result = provider->D3D12_CreateFeature(InCmdList, InFeatureID, InParameters, &proxyHandle->nativeHandle);
+    }
+
+    // The game gets no handle to release
+    if (result != NVSDK_NGX_Result_Success)
+    {
+        delete proxyHandle;
+        return result;
+    }
 
     *OutHandle = (NVSDK_NGX_Handle*) proxyHandle;
 
@@ -303,12 +361,17 @@ NVSDK_NGX_Result Nvngx_FG::D3D12_ReleaseFeature(NVSDK_NGX_Handle* InHandle)
 
     // LOG_TRACE("Handle received from the game: {:X}", (uint64_t) InHandle);
 
-    std::scoped_lock lock(((Nvngx_FG_Handle*) InHandle)->handleMutex);
+    Nvngx_FG_Handle* ourHandle = (Nvngx_FG_Handle*) InHandle;
+    NVSDK_NGX_Result result;
 
-    auto result = provider->D3D12_ReleaseFeature(((Nvngx_FG_Handle*) InHandle)->nativeHandle);
+    // Lock must end before the handle (and its mutex) is deleted
+    {
+        std::scoped_lock lock(ourHandle->handleMutex);
+        result = provider->D3D12_ReleaseFeature(ourHandle->nativeHandle);
+    }
 
     if (result == NVSDK_NGX_Result_Success)
-        delete InHandle;
+        delete ourHandle;
 
     return result;
 }
@@ -359,14 +422,21 @@ NVSDK_NGX_Result Nvngx_FG::D3D12_EvaluateFeature(ID3D12GraphicsCommandList* InCm
         InParameters->Get("DLSSG.HUDLess", &hudlessResource);
         auto hudlessState = D3D12_RESOURCE_STATE_COPY_DEST;
 
-        auto device = State::Instance().currentD3D12Device;
+        // The copy runs on this list, its objects must be from the same device
+        Microsoft::WRL::ComPtr<ID3D12Device> device;
+        if (InCmdList != nullptr)
+            InCmdList->GetDevice(IID_PPV_ARGS(&device));
 
         if (presentWithHud && hudlessResource && device)
         {
-            if (_hudCopy.get() == nullptr)
-                _hudCopy = std::make_unique<HudCopy_Dx12>("HudCopy", device);
+            // Its objects keep the old device alive, so it can go here
+            if (_hudCopyDx12.get() == nullptr || _hudCopyDx12Device != device.Get())
+            {
+                _hudCopyDx12 = std::make_unique<HudCopy_Dx12>("HudCopy", device.Get());
+                _hudCopyDx12Device = device.Get();
+            }
 
-            if (auto hudCopy = _hudCopy.get(); hudCopy && hudCopy->IsInit())
+            if (auto hudCopy = _hudCopyDx12.get(); hudCopy && hudCopy->IsInit())
             {
                 // In Cyberprank - DLSSG has noise issues, FSR FG has noise + vignetting
                 // In Death Stranding 2 - DLSSG has wrong colormapping it seems, FSR FG is fine
@@ -398,6 +468,55 @@ NVSDK_NGX_Result Nvngx_FG::D3D12_EvaluateFeature(ID3D12GraphicsCommandList* InCm
                                            InCallback);
 }
 
+void Nvngx_FG::WrapProviderCallbacks(NVSDK_NGX_Parameter* InParameters)
+{
+    using PFN_GetCurrentSettings = NVSDK_NGX_Result (*)(NVSDK_NGX_Handle*, NVSDK_NGX_Parameter*);
+
+    static PFN_GetCurrentSettings wrapper = [](NVSDK_NGX_Handle* InHandle,
+                                               NVSDK_NGX_Parameter* InParams) -> NVSDK_NGX_Result
+    {
+        auto original = (PFN_GetCurrentSettings) _providerGetCurrentSettings;
+
+        if (original == nullptr)
+            return NVSDK_NGX_Result_Fail;
+
+        if (InHandle != nullptr && InHandle->Id >= NVNGX_PROVIDER_ID_OFFSET)
+            InHandle = ((Nvngx_FG_Handle*) InHandle)->nativeHandle;
+
+        return original(InHandle, InParams);
+    };
+
+    void* callback = nullptr;
+
+    if (InParameters->Get("DLSSG.GetCurrentSettingsCallback", &callback) != NVSDK_NGX_Result_Success ||
+        callback == nullptr || callback == (void*) wrapper)
+    {
+        return;
+    }
+
+    _providerGetCurrentSettings = callback;
+    InParameters->Set("DLSSG.GetCurrentSettingsCallback", (void*) wrapper);
+}
+
+void Nvngx_FG::PrepareHudCopyVk(VkDevice InDevice, VkPhysicalDevice InPD)
+{
+    // The old device is still alive, VkDeviceDestroyed resets it otherwise
+    if (!_hudCopyVk || _hudCopyVkDevice != InDevice)
+    {
+        _hudCopyVk = std::make_unique<HudCopy_Vk>("HudCopy", InDevice, InPD);
+        _hudCopyVkDevice = InDevice;
+    }
+}
+
+void Nvngx_FG::VkDeviceDestroyed(VkDevice device)
+{
+    if (device == _hudCopyVkDevice)
+    {
+        _hudCopyVk.reset();
+        _hudCopyVkDevice = VK_NULL_HANDLE;
+    }
+}
+
 NVSDK_NGX_Result Nvngx_FG::D3D12_PopulateParameters_Impl(NVSDK_NGX_Parameter* InParameters)
 {
     auto* provider = getProvider();
@@ -405,7 +524,10 @@ NVSDK_NGX_Result Nvngx_FG::D3D12_PopulateParameters_Impl(NVSDK_NGX_Parameter* In
     if (!provider)
         return NVSDK_NGX_Result_Fail;
 
-    return provider->D3D12_PopulateParameters_Impl(InParameters);
+    auto result = provider->D3D12_PopulateParameters_Impl(InParameters);
+    WrapProviderCallbacks(InParameters);
+
+    return result;
 }
 
 NVSDK_NGX_Result Nvngx_FG::VULKAN_Init(unsigned long long InApplicationId, const wchar_t* InApplicationDataPath,
@@ -417,6 +539,8 @@ NVSDK_NGX_Result Nvngx_FG::VULKAN_Init(unsigned long long InApplicationId, const
 
     if (!provider)
         return NVSDK_NGX_Result_Fail;
+
+    PrepareHudCopyVk(InDevice, InPD);
 
     return provider->VULKAN_Init(InApplicationId, InApplicationDataPath, InInstance, InPD, InDevice, InGIPA, InGDPA,
                                  InFeatureInfo, InSDKVersion);
@@ -432,6 +556,8 @@ NVSDK_NGX_Result Nvngx_FG::VULKAN_Init_Ext(unsigned long long InApplicationId, c
     if (!provider)
         return NVSDK_NGX_Result_Fail;
 
+    PrepareHudCopyVk(InDevice, InPD);
+
     return provider->VULKAN_Init_Ext(InApplicationId, InApplicationDataPath, InInstance, InPD, InDevice, InSDKVersion,
                                      InFeatureInfo);
 }
@@ -446,6 +572,8 @@ NVSDK_NGX_Result Nvngx_FG::VULKAN_Init_Ext2(unsigned long long InApplicationId, 
 
     if (!provider)
         return NVSDK_NGX_Result_Fail;
+
+    PrepareHudCopyVk(InDevice, InPD);
 
     return provider->VULKAN_Init_Ext2(InApplicationId, InApplicationDataPath, InInstance, InPD, InDevice, InGIPA,
                                       InGDPA, InSDKVersion, InFeatureInfo);
@@ -485,16 +613,26 @@ NVSDK_NGX_Result Nvngx_FG::VULKAN_GetScratchBufferSize(NVSDK_NGX_Feature InFeatu
 NVSDK_NGX_Result Nvngx_FG::VULKAN_CreateFeature(VkCommandBuffer InCmdBuffer, NVSDK_NGX_Feature InFeatureID,
                                                 NVSDK_NGX_Parameter* InParameters, NVSDK_NGX_Handle** OutHandle)
 {
+    if (!OutHandle)
+        return NVSDK_NGX_Result_FAIL_InvalidParameter;
+
+    // A failed create leaves no handle, its callers can check it
+    *OutHandle = nullptr;
+
     auto* provider = getProvider();
 
     if (!provider)
         return NVSDK_NGX_Result_Fail;
 
-    if (!OutHandle)
-        return NVSDK_NGX_Result_FAIL_InvalidParameter;
-
     auto proxyHandle = new Nvngx_FG_Handle(lastIdCreated++ + NVNGX_PROVIDER_ID_OFFSET);
     auto result = provider->VULKAN_CreateFeature(InCmdBuffer, InFeatureID, InParameters, &proxyHandle->nativeHandle);
+
+    // The game gets no handle to release
+    if (result != NVSDK_NGX_Result_Success)
+    {
+        delete proxyHandle;
+        return result;
+    }
 
     *OutHandle = (NVSDK_NGX_Handle*) proxyHandle;
 
@@ -507,17 +645,27 @@ NVSDK_NGX_Result Nvngx_FG::VULKAN_CreateFeature1(VkDevice InDevice, VkCommandBuf
                                                  NVSDK_NGX_Feature InFeatureID, NVSDK_NGX_Parameter* InParameters,
                                                  NVSDK_NGX_Handle** OutHandle)
 {
+    if (!OutHandle)
+        return NVSDK_NGX_Result_FAIL_InvalidParameter;
+
+    // A failed create leaves no handle, its callers can check it
+    *OutHandle = nullptr;
+
     auto* provider = getProvider();
 
     if (!provider)
         return NVSDK_NGX_Result_Fail;
 
-    if (!OutHandle)
-        return NVSDK_NGX_Result_FAIL_InvalidParameter;
-
     auto proxyHandle = new Nvngx_FG_Handle(lastIdCreated++ + NVNGX_PROVIDER_ID_OFFSET);
     auto result =
         provider->VULKAN_CreateFeature1(InDevice, InCmdList, InFeatureID, InParameters, &proxyHandle->nativeHandle);
+
+    // The game gets no handle to release
+    if (result != NVSDK_NGX_Result_Success)
+    {
+        delete proxyHandle;
+        return result;
+    }
 
     *OutHandle = (NVSDK_NGX_Handle*) proxyHandle;
 
@@ -542,12 +690,16 @@ NVSDK_NGX_Result Nvngx_FG::VULKAN_ReleaseFeature(NVSDK_NGX_Handle* InHandle)
     // LOG_TRACE("Handle received from the game: {:X}", (uint64_t) InHandle);
 
     Nvngx_FG_Handle* ourHandle = (Nvngx_FG_Handle*) InHandle;
-    std::scoped_lock lock(ourHandle->handleMutex);
+    NVSDK_NGX_Result result;
 
-    auto result = provider->VULKAN_ReleaseFeature(ourHandle->nativeHandle);
+    // Lock must end before the handle (and its mutex) is deleted
+    {
+        std::scoped_lock lock(ourHandle->handleMutex);
+        result = provider->VULKAN_ReleaseFeature(ourHandle->nativeHandle);
+    }
 
     if (result == NVSDK_NGX_Result_Success)
-        delete InHandle;
+        delete ourHandle;
 
     return result;
 }
@@ -583,9 +735,78 @@ NVSDK_NGX_Result Nvngx_FG::VULKAN_EvaluateFeature(VkCommandBuffer InCmdList, con
     Nvngx_FG_Handle* ourHandle = (Nvngx_FG_Handle*) InFeatureHandle;
     std::shared_lock lock(ourHandle->handleMutex);
 
+    bool applyHudCutoff = Config::Instance()->FGHudCutoff.value_or_default() > 0.0f ||
+                          State::Instance().gameQuirks & GameQuirk::FSRFGHudlessMismatchFixup;
+
+    uint32_t frameIndex = 1;
+    InParameters->Get("DLSSG.MultiFrameIndex", &frameIndex);
+
+    if (applyHudCutoff && frameIndex == 1)
+    {
+        NVSDK_NGX_Resource_VK* presentWithHud = nullptr;
+        InParameters->Get("DLSSG.Backbuffer", (void**) &presentWithHud);
+        VkImageLayout presentWithHudLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        NVSDK_NGX_Resource_VK* hudlessResource = nullptr;
+        InParameters->Get("DLSSG.HUDLess", (void**) &hudlessResource);
+        VkImageLayout hudlessLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+        if (presentWithHud && hudlessResource)
+        {
+            if (auto hudCopy = _hudCopyVk.get(); hudCopy && hudCopy->IsInit())
+            {
+                float hudDetectionThreshold = 0.03f;
+
+                if (Config::Instance()->FGHudCutoff.value_or_default() > 0.0f)
+                    hudDetectionThreshold = Config::Instance()->FGHudCutoff.value_or_default() / 10.0f;
+
+                VkImageInfo presentWithHudInfo = *(VkImageInfo*) &presentWithHud->Resource.ImageViewInfo;
+                VkImageInfo hudlessResourceInfo = *(VkImageInfo*) &hudlessResource->Resource.ImageViewInfo;
+
+                hudCopy->Dispatch(InCmdList, hudlessResourceInfo, hudlessLayout, presentWithHudInfo,
+                                  presentWithHudLayout, hudDetectionThreshold);
+            }
+        }
+        else
+        {
+            LOG_WARN("Couldn't run hudless fixup");
+        }
+    }
+
+    if (Config::Instance()->NvngxFGDisableHudless.value_or_default())
+        InParameters->Set("DLSSG.HUDLess", (void*) nullptr);
+
+    static constexpr const char* trackedImages[] = {
+        "DLSSG.Backbuffer",
+        "DLSSG.MVecs",
+        "DLSSG.Depth",
+        "DLSSG.HUDLess",
+        "DLSSG.UI",
+        "DLSSG.UIAlpha",
+        "DLSSG.NoWarp",
+        "DLSSG.BidirectionalDistortionField",
+        "DLSSG.OutputInterpolated",
+        "DLSSG.OutputReal",
+        "DLSSG.OutputDisableInterpolation",
+    };
+
+    for (auto name : trackedImages)
+    {
+        NVSDK_NGX_Resource_VK* resource = nullptr;
+
+        if (InParameters->Get(name, (void**) &resource) == NVSDK_NGX_Result_Success && resource != nullptr &&
+            resource->Type == NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW)
+        {
+            NvngxVkLayouts::Track(resource->Resource.ImageViewInfo.Image);
+        }
+    }
+
     // LOG_TRACE("Handle received from the game: {:X}", (uint64_t) InFeatureHandle);
 
-    return provider->VULKAN_EvaluateFeature(InCmdList, ourHandle->nativeHandle, InParameters, InCallback);
+    NvngxVkLayouts::inEvaluate = true;
+    auto result = provider->VULKAN_EvaluateFeature(InCmdList, ourHandle->nativeHandle, InParameters, InCallback);
+    NvngxVkLayouts::inEvaluate = false;
+    return result;
 }
 
 NVSDK_NGX_Result Nvngx_FG::VULKAN_PopulateParameters_Impl(NVSDK_NGX_Parameter* InParameters)
@@ -595,5 +816,11 @@ NVSDK_NGX_Result Nvngx_FG::VULKAN_PopulateParameters_Impl(NVSDK_NGX_Parameter* I
     if (!provider)
         return NVSDK_NGX_Result_Fail;
 
-    return provider->VULKAN_PopulateParameters_Impl(InParameters);
+    auto result = provider->VULKAN_PopulateParameters_Impl(InParameters);
+    WrapProviderCallbacks(InParameters);
+
+    // Providers report their own max, Streamline sizes its swapchain with this one
+    InParameters->Set("DLSSG.MultiFrameCountMax", streamlineMaxFakeFramesCount(API::Vulkan));
+
+    return result;
 }

@@ -2,11 +2,18 @@
 #include "GpuTime_Dx12.h"
 
 #include <State.h>
+#include <misc/DeferredRelease.h>
 
 #include <include/d3dx/d3dx12.h>
 
 GpuTime_Dx12::GpuTime_Dx12(ID3D12Device* device)
 {
+    if (device == nullptr)
+    {
+        LOG_ERROR("GpuTime_Dx12 created with nullptr device");
+        return;
+    }
+
     // Create query heap for Start and End timestamps per buffer
     D3D12_QUERY_HEAP_DESC queryHeapDesc = {};
     queryHeapDesc.Count = QUERY_BUFFER_COUNT * 2;
@@ -40,8 +47,8 @@ GpuTime_Dx12::GpuTime_Dx12(ID3D12Device* device)
 
 GpuTime_Dx12::~GpuTime_Dx12()
 {
-    SAFE_RELEASE(_queryHeap);
-    SAFE_RELEASE(_readbackBuffer);
+    DeferredRelease::Release(_queryHeap);
+    DeferredRelease::Release(_readbackBuffer);
 }
 
 void GpuTime_Dx12::Start(ID3D12GraphicsCommandList* cmdList)
@@ -113,6 +120,7 @@ std::optional<double> GpuTime_Dx12::ReadGpuTime(ID3D12CommandQueue* commandQueue
     }
 
     _readbackBuffer->Unmap(0, &writeRange);
+    _trigger[previousFrameIndex] = false;
 
     return elapsedTimeMs;
 }

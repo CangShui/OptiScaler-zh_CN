@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "Shader_Dx12.h"
 #include <d3dx/d3dx12.h>
+#include <misc/DeferredRelease.h>
 
 using Microsoft::WRL::ComPtr;
 
@@ -11,12 +12,13 @@ Shader_Dx12::Shader_Dx12(std::string InName, ID3D12Device* InDevice) : _name(InN
 
 Shader_Dx12::~Shader_Dx12()
 {
-    if (!_init || State::Instance().isShuttingDown)
+    if (State::Instance().isShuttingDown)
         return;
 
-    SAFE_RELEASE(_pipelineState);
-    SAFE_RELEASE(_rootSignature);
-    SAFE_RELEASE(_constantBuffer);
+    // Command lists in flight can still reference these
+    DeferredRelease::Release(_pipelineState);
+    DeferredRelease::Release(_rootSignature);
+    DeferredRelease::Release(_constantBuffer);
 }
 
 DXGI_FORMAT Shader_Dx12::TranslateTypelessFormats(DXGI_FORMAT format)
@@ -33,7 +35,7 @@ DXGI_FORMAT Shader_Dx12::TranslateTypelessFormats(DXGI_FORMAT format)
         return DXGI_FORMAT_R16G16B16A16_FLOAT;
 
     case DXGI_FORMAT_R10G10B10A2_TYPELESS:
-        return DXGI_FORMAT_R10G10B10A2_UINT;
+        return DXGI_FORMAT_R10G10B10A2_UNORM;
 
     case DXGI_FORMAT_R8G8B8A8_TYPELESS:
         return DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -49,19 +51,19 @@ DXGI_FORMAT Shader_Dx12::TranslateTypelessFormats(DXGI_FORMAT format)
 
     // Some shaders didn't have those conversions and I'm not 100% sure if it's fine to do for them
     case DXGI_FORMAT_R24G8_TYPELESS:
+    case DXGI_FORMAT_D24_UNORM_S8_UINT:
         return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
 
     case DXGI_FORMAT_R32G8X24_TYPELESS:
+    case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
         return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
 
     case DXGI_FORMAT_R32_TYPELESS:
+    case DXGI_FORMAT_D32_FLOAT:
         return DXGI_FORMAT_R32_FLOAT;
 
-    case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
-        return DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
-
-    case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
-        return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+    case DXGI_FORMAT_D16_UNORM:
+        return DXGI_FORMAT_R16_UNORM;
 
     default:
         return format;
@@ -130,8 +132,8 @@ bool Shader_Dx12::CreateBufferResource(ID3D12Device* InDevice, ID3D12Resource* I
 
         if (bufDesc.Width != inDesc.Width || bufDesc.Height != inDesc.Height || bufDesc.Format != inDesc.Format)
         {
-            (*OutResource)->Release();
-            (*OutResource) = nullptr;
+            // Previous frames can still be using it
+            DeferredRelease::Release(*OutResource);
             LOG_WARN("Release {}x{}, new one: {}x{}", bufDesc.Width, bufDesc.Height, inDesc.Width, inDesc.Height);
         }
         else
@@ -144,13 +146,16 @@ bool Shader_Dx12::CreateBufferResource(ID3D12Device* InDevice, ID3D12Resource* I
     D3D12_HEAP_FLAGS heapFlags;
     HRESULT hr = InResource->GetHeapProperties(&heapProperties, &heapFlags);
 
+    // Reserved resources have no heap
     if (hr != S_OK)
-    {
-        LOG_ERROR("GetHeapProperties result: {:X}", (UINT64) hr);
-        return false;
-    }
+        heapProperties = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
 
-    inDesc.Flags |= ResourceFlags;
+    // Only what the shader needs, source flags like ALLOW_DEPTH_STENCIL or DENY_SHADER_RESOURCE
+    // are invalid together with UAV and inherited mips would only waste memory
+    inDesc.Flags = ResourceFlags;
+    inDesc.MipLevels = 1;
+    inDesc.Alignment = 0;
+    inDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
 
     hr = InDevice->CreateCommittedResource(&heapProperties, D3D12_HEAP_FLAG_NONE, &inDesc, InState, nullptr,
                                            IID_PPV_ARGS(OutResource));
@@ -184,7 +189,8 @@ void Shader_Dx12::SetBufferState(ID3D12GraphicsCommandList* InCommandList, D3D12
 
 // From DirectXHelpers.cpp licensed under MIT
 void Shader_Dx12::CreateShaderResourceView(ID3D12Device* device, ID3D12Resource* tex,
-                                           D3D12_CPU_DESCRIPTOR_HANDLE srvDescriptor, DXGI_FORMAT format)
+                                           D3D12_CPU_DESCRIPTOR_HANDLE srvDescriptor, DXGI_FORMAT format,
+                                           bool translateTypeless)
 {
     if (!device || !tex)
         throw std::invalid_argument("Direct3D device and resource must be valid");
@@ -198,7 +204,13 @@ void Shader_Dx12::CreateShaderResourceView(ID3D12Device* device, ID3D12Resource*
     }
 
     D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-    srvDesc.Format = TranslateTypelessFormats((format != DXGI_FORMAT_UNKNOWN) ? format : desc.Format);
+    const auto viewFormat = (format != DXGI_FORMAT_UNKNOWN) ? format : desc.Format;
+
+    if (translateTypeless)
+        srvDesc.Format = TranslateTypelessFormats(viewFormat);
+    else
+        srvDesc.Format = viewFormat;
+
     srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
     const UINT mipLevels = (desc.MipLevels) ? static_cast<UINT>(desc.MipLevels) : static_cast<UINT>(-1);
@@ -254,7 +266,8 @@ void Shader_Dx12::CreateShaderResourceView(ID3D12Device* device, ID3D12Resource*
 }
 
 void Shader_Dx12::CreateUnorderedAccessView(ID3D12Device* device, ID3D12Resource* tex,
-                                            D3D12_CPU_DESCRIPTOR_HANDLE uavDescriptor, uint32_t mipLevel)
+                                            D3D12_CPU_DESCRIPTOR_HANDLE uavDescriptor, uint32_t mipLevel,
+                                            bool translateTypeless)
 {
     if (!device || !tex)
         throw std::invalid_argument("Direct3D device and resource must be valid");
@@ -268,7 +281,10 @@ void Shader_Dx12::CreateUnorderedAccessView(ID3D12Device* device, ID3D12Resource
     }
 
     D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
-    uavDesc.Format = TranslateTypelessFormats(desc.Format);
+    if (translateTypeless)
+        uavDesc.Format = TranslateTypelessFormats(desc.Format);
+    else
+        uavDesc.Format = desc.Format;
 
     switch (desc.Dimension)
     {
@@ -322,7 +338,8 @@ void Shader_Dx12::CreateUnorderedAccessView(ID3D12Device* device, ID3D12Resource
 }
 
 void Shader_Dx12::CreateRenderTargetView(ID3D12Device* device, ID3D12Resource* tex,
-                                         D3D12_CPU_DESCRIPTOR_HANDLE rtvDescriptor, uint32_t mipLevel)
+                                         D3D12_CPU_DESCRIPTOR_HANDLE rtvDescriptor, uint32_t mipLevel,
+                                         bool translateTypeless)
 {
     if (!device || !tex)
         throw std::invalid_argument("Direct3D device and resource must be valid");
@@ -336,7 +353,10 @@ void Shader_Dx12::CreateRenderTargetView(ID3D12Device* device, ID3D12Resource* t
     }
 
     D3D12_RENDER_TARGET_VIEW_DESC rtvDesc = {};
-    rtvDesc.Format = TranslateTypelessFormats(desc.Format);
+    if (translateTypeless)
+        rtvDesc.Format = TranslateTypelessFormats(desc.Format);
+    else
+        rtvDesc.Format = desc.Format;
 
     switch (desc.Dimension)
     {

@@ -113,31 +113,33 @@ bool OS_Vk::Dispatch(VkCommandBuffer InCmdList, const VkImageInfo& InResourceVie
     if (!_init || InCmdList == VK_NULL_HANDLE)
         return false;
 
+    ScopedGpuTime_Vk scopedGpuTime(GpuTime.get(), InCmdList);
+
     // Update Constants
     FsrEasuCon(fsr1Constants.const0, fsr1Constants.const1, fsr1Constants.const2, fsr1Constants.const3,
                State::Instance().currentFeature->TargetWidth(), State::Instance().currentFeature->TargetHeight(),
                State::Instance().currentFeature->TargetWidth(), State::Instance().currentFeature->TargetHeight(),
                State::Instance().currentFeature->DisplayWidth(), State::Instance().currentFeature->DisplayHeight());
 
+    // EASU only upscales, downscaling stays on the shader's bilinear path
+    fsr1Constants.squaredRadius =
+        State::Instance().currentFeature->TargetWidth() < State::Instance().currentFeature->DisplayWidth() ? UINT32_MAX
+                                                                                                           : 0;
+
     constants.srcWidth = State::Instance().currentFeature->TargetWidth();
     constants.srcHeight = State::Instance().currentFeature->TargetHeight();
     constants.destWidth = State::Instance().currentFeature->DisplayWidth();
     constants.destHeight = State::Instance().currentFeature->DisplayHeight();
 
-    if (_mappedConstantBuffer)
-    {
-        if (Config::Instance()->OutputScalingDownscaler.value_or_default() == Scaler::FSR1)
-            memcpy(_mappedConstantBuffer, &fsr1Constants, sizeof(UpscaleShaderConstants));
-        else
-            memcpy(_mappedConstantBuffer, &constants, sizeof(Constants));
-    }
-
     // Advance Frame Index
     _currentSetIndex = (_currentSetIndex + 1) % _maxFramesInFlight;
     VkDescriptorSet currentSet = _descriptorSets[_currentSetIndex];
 
+    const auto bufferInfo = Config::Instance()->OutputScalingDownscaler.value_or_default() == Scaler::FSR1
+                                ? WriteConstants(&fsr1Constants, sizeof(UpscaleShaderConstants))
+                                : WriteConstants(&constants, sizeof(Constants));
+
     // Build Descriptor Writes
-    VkDescriptorBufferInfo bufferInfo { _constantBuffer, 0, sizeof(Constants) };
     VkDescriptorImageInfo sourceInfo { VK_NULL_HANDLE, InResourceView.ImageView,
                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkDescriptorImageInfo destInfo { VK_NULL_HANDLE, OutResourceView.ImageView, VK_IMAGE_LAYOUT_GENERAL };

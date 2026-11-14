@@ -1,10 +1,12 @@
 #include "pch.h"
 #include "XeFG_Dx12.h"
-#include <hudfix/Hudfix_Dx12.h>
-#include <menu/menu_overlay_dx.h>
-#include <resource_tracking/ResTrack_dx12.h>
 
-#include <nvapi/fakenvapi.h>
+#include <hudfix/Hudfix_Dx11.h>
+#include <hudfix/Hudfix_Dx12.h>
+
+#include <menu/menu_overlay_dx.h>
+#include <misc/DeferredRelease.h>
+#include <resource_tracking/ResTrack_dx12.h>
 
 #include <magic_enum.hpp>
 
@@ -32,6 +34,43 @@ void XeFG_Dx12::xefgLogCallback(const char* message, xefg_swapchain_logging_leve
         spdlog::error("XeFG Log: {}", message);
         return;
     }
+}
+
+int XeFG_Dx12::QueryMaxInterpolationCount(ID3D12Device* device)
+{
+    if (device == nullptr || (XeFGProxy::Module() == nullptr && !XeFGProxy::InitXeFG()) ||
+        XeFGProxy::D3D12CreateContext() == nullptr || XeFGProxy::GetProperties() == nullptr ||
+        XeFGProxy::Destroy() == nullptr)
+    {
+        return 0;
+    }
+
+#ifndef DONT_USE_XMX
+    ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
+#endif // !DONT_USE_XMX
+
+    xefg_swapchain_handle_t context = nullptr;
+    auto result = XeFGProxy::D3D12CreateContext()(device, &context);
+
+    if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS)
+    {
+        LOG_ERROR("D3D12CreateContext error: {} ({})", magic_enum::enum_name(result), (UINT) result);
+        return 0;
+    }
+
+    // Only maxSupportedInterpolations is reported before swapchain init
+    xefg_swapchain_properties_t props {};
+    result = XeFGProxy::GetProperties()(context, &props);
+    XeFGProxy::Destroy()(context);
+
+    if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS)
+    {
+        LOG_ERROR("GetProperties error: {} ({})", magic_enum::enum_name(result), (UINT) result);
+        return 0;
+    }
+
+    LOG_INFO("Max supported interpolations: {}", props.maxSupportedInterpolations);
+    return static_cast<int>(props.maxSupportedInterpolations);
 }
 
 bool XeFG_Dx12::CreateSwapchainContext(ID3D12Device* device)
@@ -67,24 +106,11 @@ bool XeFG_Dx12::CreateSwapchainContext(ID3D12Device* device)
             LOG_ERROR("SetLoggingCallback error: {} ({})", magic_enum::enum_name(result), (UINT) result);
         }
 
-#ifndef LOW_LATENCY_INPUTS
-        // Force fakenvapi to create XeLL for us
-        if (fakenvapi::forceMode(device, LowLatencyMode::XeLL))
+        // XeFG reads the frames of the XeLL context it gets: the XeLL output's, or its own next to a Reflex or
+        // AntiLag 2 output. Either stays valid until this context is destroyed.
+        if (auto xellContext = InputCommon::acquire_xefg_xell(device); xellContext != nullptr)
         {
-            xell_sleep_params_t sleepParams = {};
-            sleepParams.bLowLatencyMode = true;
-            sleepParams.bLowLatencyBoost = false;
-            sleepParams.minimumIntervalUs = 0;
-
-            auto xellResult =
-                XeLLProxy::SetSleepMode()((xell_context_handle_t) fakenvapi::getCurrentContext(), &sleepParams);
-            if (xellResult != XELL_RESULT_SUCCESS)
-            {
-                LOG_ERROR("SetSleepMode error: {} ({})", magic_enum::enum_name(xellResult), (UINT) xellResult);
-                return false;
-            }
-
-            result = XeFGProxy::SetLatencyReduction()(_swapChainContext, fakenvapi::getCurrentContext());
+            result = XeFGProxy::SetLatencyReduction()(_swapChainContext, xellContext);
 
             if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS)
             {
@@ -92,33 +118,6 @@ bool XeFG_Dx12::CreateSwapchainContext(ID3D12Device* device)
                 return false;
             }
         }
-#else
-        InputXeLL::xell_input_handle_t localXellContext;
-        if (InputXeLL::D3D12CreateContext(device, &localXellContext) == XELL_RESULT_SUCCESS)
-        {
-            localXellContext->inputContext.localContext = true; // We created this context
-
-            xell_sleep_params_t sleepParams = {};
-            sleepParams.bLowLatencyMode = true;
-            sleepParams.bLowLatencyBoost = false;
-            sleepParams.minimumIntervalUs = 0;
-
-            auto xellResult = InputXeLL::SetSleepMode(localXellContext, &sleepParams);
-            if (xellResult != XELL_RESULT_SUCCESS)
-            {
-                LOG_ERROR("SetSleepMode error: {} ({})", magic_enum::enum_name(xellResult), (UINT) xellResult);
-                return false;
-            }
-
-            result = XeFGProxy::SetLatencyReduction()(_swapChainContext, (xell_context_handle_t) localXellContext);
-
-            if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS)
-            {
-                LOG_ERROR("SetLatencyReduction error: {} ({})", magic_enum::enum_name(result), (UINT) result);
-                return false;
-            }
-        }
-#endif
         else
         {
             LOG_ERROR("Couldn't create XeLL");
@@ -183,6 +182,14 @@ bool XeFG_Dx12::DestroySwapchainContext()
         else
         {
             State::Instance().currentFGSwapchain = nullptr;
+            _allowLowerFrameId = true;
+
+            // New context starts with its defaults, Dispatch sets them again
+            _framesToInterpolate = -1;
+            _uiComposition = false;
+
+            // Its XeLL context isn't read anymore
+            InputCommon::release_xefg_xell();
         }
     }
 
@@ -241,47 +248,9 @@ xefg_swapchain_d3d12_resource_data_t XeFG_Dx12::GetResourceData(FG_ResourceType 
     return resourceParam;
 }
 
-bool XeFG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, DXGI_SWAP_CHAIN_DESC* desc,
-                                IDXGISwapChain** swapChain, bool readyToRelease)
+bool XeFG_Dx12::CreateSwapchainInternal(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, DXGI_SWAP_CHAIN_DESC* desc,
+                                        IDXGISwapChain** swapChain)
 {
-    if (State::Instance().currentFGSwapchain != nullptr && _hwnd == desc->OutputWindow)
-    {
-        if (Config::Instance()->FGPreserveSwapChain.value_or_default())
-        {
-            LOG_WARN("FG swapchain already created for the same output window!");
-            auto result = State::Instance().currentFGSwapchain->ResizeBuffers(
-                              desc->BufferCount, desc->BufferDesc.Width, desc->BufferDesc.Height,
-                              desc->BufferDesc.Format, desc->Flags) == S_OK;
-
-            *swapChain = State::Instance().currentFGSwapchain;
-            return result;
-        }
-        // Game is creating new swapchain without releasing old one,
-        // we need to release it to avoid errors
-        else if (readyToRelease)
-        {
-            LOG_INFO("Releasing old swapchain");
-            ReleaseSwapchain(_hwnd);
-
-            // Not sure why but XeFG sometimes doesn't release the swapchain properly
-            // so we force release it here to be able to recreate swapchain for same hwnd
-            if (State::Instance().currentRealSwapchain != nullptr)
-            {
-                UINT release = 0;
-                do
-                {
-                    release = State::Instance().currentRealSwapchain->Release();
-                    LOG_DEBUG("Releasing swapchain, ref count: {}", release);
-                } while (release > 0);
-            }
-        }
-        else
-        {
-            LOG_WARN("FG swapchain already exists for the same output window and is not ready to release!");
-            return false;
-        }
-    }
-
     if (_swapChainContext == nullptr)
     {
         LOG_DEBUG("Creating swapchain context for the first time");
@@ -367,7 +336,8 @@ bool XeFG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQu
 
     // For old libxess_fg versions we use max to control interpolation count
     if (XeFGProxy::SetNumInterpolatedFrames() == nullptr)
-        intTarget = Config::Instance()->FGXeFGInterpolationCount.value_or_default();
+        intTarget =
+            Config::Instance()->FGInterpolationCount(Config::Instance()->FGXeFGInterpolationCount.value_or_default());
 
     if (intTarget < 1 || intTarget > _maxInterpolationCount)
     {
@@ -446,47 +416,10 @@ bool XeFG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQu
     return true;
 }
 
-bool XeFG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, HWND hwnd,
-                                 DXGI_SWAP_CHAIN_DESC1* desc, DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc,
-                                 IDXGISwapChain1** swapChain, bool readyToRelease)
+bool XeFG_Dx12::CreateSwapchain1Internal(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, HWND hwnd,
+                                         DXGI_SWAP_CHAIN_DESC1* desc, DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc,
+                                         IDXGISwapChain1** swapChain)
 {
-    if (State::Instance().currentFGSwapchain != nullptr && _hwnd == hwnd)
-    {
-        if (Config::Instance()->FGPreserveSwapChain.value_or_default())
-        {
-            LOG_WARN("FG swapchain already created for the same output window!");
-            auto result = State::Instance().currentFGSwapchain->ResizeBuffers(
-                              desc->BufferCount, desc->Width, desc->Height, desc->Format, desc->Flags) == S_OK;
-
-            *swapChain = (IDXGISwapChain1*) State::Instance().currentFGSwapchain;
-            return result;
-        }
-        // Game is creating new swapchain without releasing old one,
-        // we need to release it to avoid errors
-        else if (readyToRelease)
-        {
-            LOG_INFO("Releasing old swapchain");
-            ReleaseSwapchain(_hwnd);
-
-            // Not sure why but XeFG sometimes doesn't release the swapchain properly
-            // so we force release it here to be able to recreate swapchain for same hwnd
-            if (State::Instance().currentRealSwapchain != nullptr)
-            {
-                UINT release = 0;
-                do
-                {
-                    release = State::Instance().currentRealSwapchain->Release();
-                    LOG_DEBUG("Releasing swapchain, ref count: {}", release);
-                } while (release > 0);
-            }
-        }
-        else
-        {
-            LOG_WARN("FG swapchain already exists for the same output window and is not ready to release!");
-            return false;
-        }
-    }
-
     if (_swapChainContext == nullptr)
     {
         if (State::Instance().currentD3D12Device == nullptr)
@@ -534,7 +467,8 @@ bool XeFG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
 
     // For old libxess_fg versions we use max to control interpolation count
     if (XeFGProxy::SetNumInterpolatedFrames() == nullptr)
-        intTarget = Config::Instance()->FGXeFGInterpolationCount.value_or_default();
+        intTarget =
+            Config::Instance()->FGInterpolationCount(Config::Instance()->FGXeFGInterpolationCount.value_or_default());
 
     if (intTarget < 1 || intTarget > _maxInterpolationCount)
     {
@@ -619,6 +553,15 @@ void XeFG_Dx12::CreateContext(ID3D12Device* device, FG_Constants& fgConstants)
 {
     LOG_DEBUG("");
 
+    if (device == nullptr)
+    {
+        static bool logged = false;
+        if (!std::exchange(logged, true))
+            LOG_ERROR("No D3D12 device");
+
+        return;
+    }
+
     _device = device;
     CreateObjects(device);
 
@@ -656,6 +599,10 @@ void XeFG_Dx12::Activate()
         {
             _isActive = true;
             _lastDispatchedFrame = 0;
+            _generationOff = false;
+
+            // FG back on: Dynamic MFG starts its averages over but keeps what it learned
+            _dynamic.Restart();
         }
 
         LOG_INFO("SetEnabled: true, result: {} ({})", magic_enum::enum_name(result), (UINT) result);
@@ -697,6 +644,9 @@ void XeFG_Dx12::Deactivate()
             _isActive = false;
         }
 
+        // Activate switches frame generation back on
+        _generationOff = false;
+
         //_lastDispatchedFrame = 0;
         _waitingNewFrameData = false;
 
@@ -706,7 +656,7 @@ void XeFG_Dx12::Deactivate()
 
 void XeFG_Dx12::DestroyFGContext()
 {
-    Deactivate();
+    Disable();
 
     if (_fgContext != nullptr)
         _fgContext = nullptr;
@@ -785,21 +735,38 @@ bool XeFG_Dx12::Dispatch()
                      _maxInterpolationCount);
         }
 
-        if (_framesToInterpolate != Config::Instance()->FGXeFGInterpolationCount.value_or_default())
-        {
-            LOG_INFO("Interpolation count changed {} -> {}", _framesToInterpolate,
-                     Config::Instance()->FGXeFGInterpolationCount.value_or_default());
+        int targetCount = std::clamp(
+            Config::Instance()->FGInterpolationCount(Config::Instance()->FGXeFGInterpolationCount.value_or_default()),
+            1, std::max(_maxInterpolationCount, 1));
 
-            state.WAR_xefgRequestFGToggle = true;
+        // Dynamic MFG, the game's wait in the present path is its last present
+        const HWND window = _hwnd != nullptr ? _hwnd : state.currentSwapchainDesc.OutputWindow;
+        const auto dynamic =
+            _dynamic.Update(targetCount, _framesToInterpolate, _generationOff, state.lastFGPresentMs, window);
+        const bool dynamicChange = dynamic.ownChange;
+
+        // 1X: frame generation off. XeFG keeps its count, so nothing is rebuilt, and turns back on in microseconds;
+        // its first frame after that has no history and shows the real frame alone.
+        if (dynamic.generationOff != _generationOff)
+            SetGenerationOff(dynamic.generationOff);
+
+        targetCount = dynamic.count;
+
+        if (_framesToInterpolate != targetCount)
+        {
+            LOG_INFO("Interpolation count changed {} -> {}", _framesToInterpolate, targetCount);
+
+            // XeFG 3.x changes the count at the next frame, Dynamic MFG's own changes skip the FG toggle
+            if (!dynamicChange)
+                state.WAR_xefgRequestFGToggle = true;
 
 #ifndef DONT_USE_XMX
             ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
 #endif // !DONT_USE_XMX
 
-            auto intResult = XeFGProxy::SetNumInterpolatedFrames()(
-                _swapChainContext, Config::Instance()->FGXeFGInterpolationCount.value_or_default());
+            auto intResult = XeFGProxy::SetNumInterpolatedFrames()(_swapChainContext, targetCount);
 
-            _framesToInterpolate = Config::Instance()->FGXeFGInterpolationCount.value_or_default();
+            _framesToInterpolate = targetCount;
 
             if (intResult != XEFG_SWAPCHAIN_RESULT_SUCCESS)
             {
@@ -1036,6 +1003,25 @@ XeFG_Dx12::~XeFG_Dx12() { Shutdown(); }
 
 bool XeFG_Dx12::SetInterpolatedFrameCount(UINT interpolatedFrameCount) { return true; }
 
+void XeFG_Dx12::SetGenerationOff(bool off)
+{
+    if (_swapChainContext == nullptr || XeFGProxy::SetEnabled() == nullptr)
+        return;
+
+#ifndef DONT_USE_XMX
+    ScopedSkipSpoofingGlobal skipSpoofingGlobal {};
+#endif // !DONT_USE_XMX
+
+    // Only frame generation: OptiScaler's FG stays active and keeps dispatching, XeFG keeps its count
+    const auto result = XeFGProxy::SetEnabled()(_swapChainContext, !off);
+
+    if (result == XEFG_SWAPCHAIN_RESULT_SUCCESS)
+        _generationOff = off;
+
+    LOG_INFO("Dynamic MFG 1X: frame generation {}, result: {} ({})", off ? "off" : "on", magic_enum::enum_name(result),
+             (UINT) result);
+}
+
 void XeFG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
 {
     LOG_FUNC();
@@ -1057,7 +1043,7 @@ void XeFG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
     _infiniteDepth = static_cast<bool>(fgConstants.flags & FG_Flags::InfiniteDepth);
 
     // If FG Enabled from menu
-    if (Config::Instance()->FGEnabled.value_or_default())
+    if (Config::Instance()->IsFGEnabled())
     {
         // If FG context is nullptr
         if (_fgContext == nullptr)
@@ -1088,10 +1074,13 @@ void XeFG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
     else
     {
         LOG_DEBUG("!FGEnabled");
-        Deactivate();
+        Disable();
+        ReleaseResourceCopies();
+        _depthInvert.reset();
 
         state.clearCapturedHudlesses = true;
         Hudfix_Dx12::ResetCounters();
+        Hudfix_Dx11::ResetCounters();
     }
 
     if (state.fgChanged)
@@ -1101,6 +1090,7 @@ void XeFG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
         state.fgChanged = false;
 
         Hudfix_Dx12::ResetCounters();
+        Hudfix_Dx11::ResetCounters();
 
         // Pause for 10 frames
         UpdateTarget();
@@ -1117,10 +1107,11 @@ void XeFG_Dx12::ReleaseObjects()
 {
     for (size_t i = 0; i < BUFFER_COUNT; i++)
     {
-        SAFE_RELEASE(_uiCommandAllocator[i]);
-        SAFE_RELEASE(_uiCommandList[i]);
-        SAFE_RELEASE(_scCommandAllocator[i]);
-        SAFE_RELEASE(_scCommandList[i]);
+        // GPU can still be executing them
+        DeferredRelease::Release(_uiCommandAllocator[i]);
+        DeferredRelease::Release(_uiCommandList[i]);
+        DeferredRelease::Release(_scCommandAllocator[i]);
+        DeferredRelease::Release(_scCommandList[i]);
 
         // Reset command list state
         _scCommandListResetted[i] = false;
@@ -1130,11 +1121,15 @@ void XeFG_Dx12::ReleaseObjects()
         _uiAllocatorFenceValues[i] = 0;
     }
 
+    ReleaseFences();
+
     _renderUI.reset();
     _hudlessCompare.reset();
     _mvFlip.reset();
     _depthFlip.reset();
     _depthInvert.reset();
+
+    ReleaseResourceCopies();
 }
 
 void XeFG_Dx12::CreateObjects(ID3D12Device* InDevice)
@@ -1276,7 +1271,6 @@ bool XeFG_Dx12::Present()
     {
         auto ui = GetResource(FG_ResourceType::UIColor, fIndex);
         if (ui && (ui->validity == FG_ResourceValidity::UntilPresent ||
-                   ui->validity == FG_ResourceValidity::JustTrackCmdlist ||
                    ui->validity == FG_ResourceValidity::UntilPresentFromDispatch))
         {
             LOG_DEBUG("UI[{}] resource: {:X}, copy: {}", fIndex, (size_t) ui->resource, (size_t) ui->copy);
@@ -1312,7 +1306,6 @@ bool XeFG_Dx12::Present()
         {
             auto hudless = GetResource(FG_ResourceType::HudlessColor, fIndex);
             if (hudless && (hudless->validity == FG_ResourceValidity::UntilPresent ||
-                            hudless->validity == FG_ResourceValidity::JustTrackCmdlist ||
                             hudless->validity == FG_ResourceValidity::UntilPresentFromDispatch))
             {
                 LOG_DEBUG("Hudless[{}] resource: {:X}, copy: {}", fIndex, (size_t) hudless->resource,
@@ -1357,18 +1350,7 @@ bool XeFG_Dx12::Present()
             _uiCommandListResetted[fIndex] = false;
         }
 
-        if (_scCommandListResetted[fIndex])
-        {
-            LOG_DEBUG("Executing _scCommandList[{}]: {:X}", fIndex, (size_t) _scCommandList[fIndex]);
-            auto closeResult = _scCommandList[fIndex]->Close();
-
-            if (closeResult == S_OK)
-                _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_scCommandList[fIndex]);
-            else
-                LOG_ERROR("_scCommandList[{}]->Close() error: {:X}", fIndex, (UINT) closeResult);
-
-            _scCommandListResetted[fIndex] = false;
-        }
+        SubmitSCCommandList(fIndex);
     }
 
     if ((_fgFramePresentId - _lastFGFramePresentId) > 3 && IsActive() && !_waitingNewFrameData)
@@ -1484,14 +1466,18 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
     fResource->width = inputResource->width;
     fResource->height = inputResource->height;
     fResource->cmdList = inputResource->cmdList;
+    fResource->flip = inputResource->flip;
 
-    auto willFlip = State::Instance().activeFgInput == FGInput::Upscaler &&
-                    Config::Instance()->FGResourceFlip.value_or_default() &&
-                    (type == FG_ResourceType::Velocity || type == FG_ResourceType::Depth);
+    // A new resource for the slot, its old copy is stale. A re-tag passes the slot itself
+    if (inputResource != fResource)
+        fResource->copy = nullptr;
+
+    // A re-tag at dispatch passes the slot, it's flipped already
+    auto willFlip = inputResource != fResource && WillFlip(fResource);
 
     // Resource flipping
     if (willFlip && _device != nullptr)
-        FlipResource(fResource);
+        FlipResource(fResource, fIndex);
 
     // Depth Invert
     // https://github.com/intel/xess/issues/50
@@ -1501,26 +1487,44 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
     if (version < feature_version { 1, 2, 2 } && _device != nullptr && type == FG_ResourceType::Depth &&
         !Config::Instance()->FGXeFGDepthInverted.value_or_default())
     {
+        // Depth states are only valid on depth stencil resources
+        auto copyState = (fResource->state & (D3D12_RESOURCE_STATE_DEPTH_READ | D3D12_RESOURCE_STATE_DEPTH_WRITE)) != 0
+                             ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+                             : fResource->state;
+
         if (_depthInvert.get() == nullptr)
         {
             _depthInvert = std::make_unique<DI_Dx12>("DepthInvert", _device);
         }
         else if (_depthInvert->IsInit())
         {
-            if (_depthInvert->CreateBufferResource(_device, fResource->GetResource(), fResource->width,
-                                                   fResource->height, fResource->state) &&
+            auto cmdList = (fResource->cmdList != nullptr) ? fResource->cmdList : GetUICommandList(fIndex);
+
+            if (cmdList != nullptr &&
+                _depthInvert->CreateBufferResource(_device, fResource->GetResource(), fResource->width,
+                                                   fResource->height, copyState) &&
                 _depthInvert->Buffer() != nullptr)
             {
-                auto cmdList = (fResource->cmdList != nullptr) ? fResource->cmdList : GetUICommandList(fIndex);
-
                 _depthInvert->SetBufferState(cmdList, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-                if (_depthInvert->Dispatch(cmdList, fResource->GetResource(), _depthInvert->Buffer()))
+                // Shader reads the input as SRV
+                auto inResource = fResource->GetResource();
+                auto inState = fResource->state;
+                auto inNeedsBarrier = (inState & D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE) == 0;
+
+                if (inNeedsBarrier)
+                    ResourceBarrier(cmdList, inResource, inState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+                if (_depthInvert->Dispatch(cmdList, inResource, _depthInvert->Buffer()))
                 {
                     fResource->copy = _depthInvert->Buffer();
+                    fResource->state = copyState;
                 }
 
-                _depthInvert->SetBufferState(cmdList, fResource->state);
+                if (inNeedsBarrier)
+                    ResourceBarrier(cmdList, inResource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, inState);
+
+                _depthInvert->SetBufferState(cmdList, copyState);
             }
         }
     }
@@ -1557,12 +1561,13 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
         _noHudless[fIndex] = false;
 
     if ((type == FG_ResourceType::Depth || type == FG_ResourceType::Velocity) ||
-        (fResource->validity != FG_ResourceValidity::UntilPresent &&
-         fResource->validity != FG_ResourceValidity::JustTrackCmdlist))
+        fResource->validity != FG_ResourceValidity::UntilPresent)
     {
-        fResource->validity = (fResource->validity != FG_ResourceValidity::ValidNow || willFlip)
-                                  ? FG_ResourceValidity::UntilPresent
-                                  : FG_ResourceValidity::ValidNow;
+        // Flip only made a copy when the shader ran
+        fResource->validity =
+            (fResource->validity != FG_ResourceValidity::ValidNow || (willFlip && fResource->copy != nullptr))
+                ? FG_ResourceValidity::UntilPresent
+                : FG_ResourceValidity::ValidNow;
 
         if (type == FG_ResourceType::HudlessColor)
         {
@@ -1571,6 +1576,7 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
 
             if (lastFormat[fIndex] != DXGI_FORMAT_UNKNOWN && lastFormat[fIndex] != desc.Format)
             {
+                std::fill_n(lastFormat, BUFFER_COUNT, desc.Format);
                 State::Instance().fgChanged = true;
                 return false;
             }
@@ -1579,6 +1585,9 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
         }
 
         xefg_swapchain_d3d12_resource_data_t resourceParam = GetResourceData(type, fIndex);
+        auto taggedState = resourceParam.incomingState;
+        bool movedToCopyDest = false;
+        auto tagCmdList = fResource->cmdList;
 
         // SDK version 2.1.1 fixes those issues
         if (version < feature_version { 1, 2, 2 })
@@ -1586,18 +1595,21 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
             // HACK: XeFG docs lie and cmd list is technically required as it checks for it
             // But it doesn't seem to use it when the validity is UNTIL_NEXT_PRESENT
             // https://github.com/intel/xess/issues/45
-            if (fResource->cmdList == nullptr && resourceParam.validity == XEFG_SWAPCHAIN_RV_UNTIL_NEXT_PRESENT)
-                fResource->cmdList = (ID3D12GraphicsCommandList*) 1;
+            // Not stored, a later re-tag would use it for a barrier
+            if (tagCmdList == nullptr && resourceParam.validity == XEFG_SWAPCHAIN_RV_UNTIL_NEXT_PRESENT)
+                tagCmdList = (ID3D12GraphicsCommandList*) 1;
 
             // HACK: XeFG seems to crash if the resource is in COPY_SOURCE state
             // even though the docs say it's the preferred state
             // https://github.com/intel/xess/issues/47
-            if (inputResource->state == D3D12_RESOURCE_STATE_COPY_SOURCE)
+            // Tagged resource can be our flip or invert copy
+            if (taggedState == D3D12_RESOURCE_STATE_COPY_SOURCE && inputResource->cmdList != nullptr)
             {
-                ResourceBarrier(inputResource->cmdList, inputResource->resource, inputResource->state,
+                ResourceBarrier(inputResource->cmdList, resourceParam.pResource, taggedState,
                                 D3D12_RESOURCE_STATE_COPY_DEST);
 
                 resourceParam.incomingState = D3D12_RESOURCE_STATE_COPY_DEST;
+                movedToCopyDest = true;
             }
         }
 
@@ -1605,31 +1617,32 @@ bool XeFG_Dx12::SetResource(Dx12Resource* inputResource)
         if (indexDiff < 0)
             indexDiff += BUFFER_COUNT;
 
+        auto result = XEFG_SWAPCHAIN_RESULT_SUCCESS;
+
         // We will us UI color later with Render UI
         if (type != FG_ResourceType::UIColor ||
             (XeFGProxy::SetUiCompositionState() != nullptr || Config::Instance()->FGDrawUIOverFG.value_or_default()))
         {
             auto frameId = static_cast<uint32_t>(_frameCount - indexDiff);
-            auto result =
-                XeFGProxy::D3D12TagFrameResource()(_swapChainContext, fResource->cmdList, frameId, &resourceParam);
+            result = XeFGProxy::D3D12TagFrameResource()(_swapChainContext, tagCmdList, frameId, &resourceParam);
             LOG_DEBUG("D3D12TagFrameResource, frameId: {}, type: {} result: {} ({})", frameId,
                       magic_enum::enum_name(type), magic_enum::enum_name(result), (int32_t) result);
-
-            if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS)
-            {
-                State::Instance().fgChanged = true;
-                UpdateTarget();
-                Deactivate();
-
-                return false;
-            }
         }
 
         // Potentially we don't need to restore but do it just to be safe
-        if (inputResource->state == D3D12_RESOURCE_STATE_COPY_SOURCE)
+        if (movedToCopyDest)
         {
-            ResourceBarrier(inputResource->cmdList, inputResource->resource, D3D12_RESOURCE_STATE_COPY_DEST,
-                            inputResource->state);
+            ResourceBarrier(inputResource->cmdList, resourceParam.pResource, D3D12_RESOURCE_STATE_COPY_DEST,
+                            taggedState);
+        }
+
+        if (result != XEFG_SWAPCHAIN_RESULT_SUCCESS)
+        {
+            State::Instance().fgChanged = true;
+            UpdateTarget();
+            Deactivate();
+
+            return false;
         }
 
         SetResourceReady(type, fIndex);
@@ -1669,11 +1682,15 @@ bool XeFG_Dx12::ReleaseSwapchain(HWND hwnd)
 
     if (!State::Instance().isShuttingDown)
     {
+        auto fgSwapchain = State::Instance().currentFGSwapchain;
+        State::Instance().currentFGSwapchain = nullptr;
+
         if (_swapChainContext != nullptr)
             DestroySwapchainContext();
 
-        _swapChainContext = nullptr;
-        State::Instance().currentFGSwapchain = nullptr;
+        // Destroy failed, the context still owns the swapchain and the window
+        if (_swapChainContext != nullptr)
+            State::Instance().currentFGSwapchain = fgSwapchain;
     }
 
     ReleaseObjects();

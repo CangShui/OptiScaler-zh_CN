@@ -1,7 +1,7 @@
 #pragma once
 
 #include "SysUtils.h"
-#include <proxies/NVNGX_Proxy.h>
+#include <proxies/Nvngx_Proxy.h>
 #include <upscalers/IFeature.h>
 
 class DLSSFeature : public virtual IFeature
@@ -12,13 +12,14 @@ class DLSSFeature : public virtual IFeature
   protected:
     NVSDK_NGX_Handle _dlssHandle = {};
     NVSDK_NGX_Handle* _p_dlssHandle = nullptr;
-    inline static bool _dlssInited = false;
+    bool _dlssInited = false;
 
     void ProcessEvaluateParams(NVSDK_NGX_Parameter* InParameters);
     void ProcessInitParams(NVSDK_NGX_Parameter* InParameters);
-    void ReadVersion();
+    // A custom NGX runtime has no snippet to ask, its file version is used instead
+    void ReadVersion(const std::wstring& customDll = L"");
 
-    static void Shutdown();
+    void Shutdown();
     float GetSharpness(const NVSDK_NGX_Parameter* InParameters);
 
   public:

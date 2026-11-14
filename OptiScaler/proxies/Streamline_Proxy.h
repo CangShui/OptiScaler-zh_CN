@@ -14,6 +14,11 @@
 #include <sl_dlss_g.h>
 #include <sl_reflex.h>
 
+#include <vulkan/vulkan.h>
+#include <sl_helpers_vk.h>
+
+#include <wrl/client.h>
+
 #pragma comment(lib, "Version.lib")
 
 class StreamlineProxy
@@ -38,6 +43,7 @@ class StreamlineProxy
     typedef decltype(&slGetFeatureFunction) PFN_slGetFeatureFunction;
     typedef decltype(&slGetNewFrameToken) PFN_slGetNewFrameToken;
     typedef decltype(&slSetD3DDevice) PFN_slSetD3DDevice;
+    typedef PFun_slSetVulkanInfo* PFN_slSetVulkanInfo;
 
     typedef HRESULT (*PFN_CreateDxgiFactory)(REFIID riid, IDXGIFactory** ppFactory);
     typedef HRESULT (*PFN_CreateDxgiFactory1)(REFIID riid, IDXGIFactory1** ppFactory);
@@ -70,8 +76,7 @@ class StreamlineProxy
             return true;
 
         auto owner = State::GetOwner();
-        if (State::Instance().activeFgOutput == FGOutput::DLSSG &&
-            State::Instance().activeFgNvngx != FGNvngxReplacement::None)
+        if (State::Instance().activeFgOutput == FGOutput::DLSSG)
         {
             State::DisableChecks(owner, "sl.");
         }
@@ -151,6 +156,9 @@ class StreamlineProxy
                 _slGetNewFrameToken =
                     (PFN_slGetNewFrameToken) KernelBaseProxy::GetProcAddress_()(_dll, "slGetNewFrameToken");
                 _slSetD3DDevice = (PFN_slSetD3DDevice) KernelBaseProxy::GetProcAddress_()(_dll, "slSetD3DDevice");
+                _slSetVulkanInfo = (PFN_slSetVulkanInfo) KernelBaseProxy::GetProcAddress_()(_dll, "slSetVulkanInfo");
+                _vkGetDeviceProcAddr =
+                    (PFN_vkGetDeviceProcAddr) KernelBaseProxy::GetProcAddress_()(_dll, "vkGetDeviceProcAddr");
                 _slCreateDxgiFactory =
                     (PFN_CreateDxgiFactory) KernelBaseProxy::GetProcAddress_()(_dll, "CreateDXGIFactory");
                 _slCreateDxgiFactory1 =
@@ -285,11 +293,82 @@ class StreamlineProxy
         return _slVersion;
     }
 
-    static bool InitWithD3D12(ID3D12Device* device)
+    template <typename T>
+    static bool ResolveActiveFeature(sl::Feature feature, const char* name, T& target, HMODULE& module,
+                                     bool required = true)
     {
-        if (_isD3D12Inited)
-            return true;
+        void* function = nullptr;
+        auto result = _slGetFeatureFunction(feature, name, function);
+        target = result == sl::Result::eOk ? reinterpret_cast<T>(function) : nullptr;
+        if (target == nullptr)
+        {
+            if (required)
+                LOG_ERROR("Active Streamline function {} unavailable: {}", name, (int) result);
+            return !required;
+        }
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(function), &module);
+        return true;
+    }
 
+    // The game gives NGX the real device, Streamline's NGX has to use the same one, not ReShade's proxy
+    static sl::Result SetD3D12Device(void* device, bool bind)
+    {
+        Microsoft::WRL::ComPtr<IUnknown> original;
+        original.Attach(Util::GetReShadeOriginal((IUnknown*) device));
+
+        if (original != nullptr)
+        {
+            LOG_INFO("Using the real device behind ReShade's proxy");
+            device = original.Get();
+        }
+
+        return bind ? SetD3DDeviceAndBind(device) : _slSetD3DDevice(device);
+    }
+
+    static sl::Result SetD3DDeviceAndBind(void* device)
+    {
+        auto result = _slSetD3DDevice(device);
+        if (result != sl::Result::eOk || !_isD3D12Requested)
+            return result;
+
+        return BindActiveFeatures() ? sl::Result::eOk : sl::Result::eErrorFeatureMissing;
+    }
+
+    // OTA overrides may replace the bundled DLLs. Resolve only from the plugins
+    // actually initialized by this interposer, after the device has been set.
+    static bool BindActiveFeatures()
+    {
+        bool ok = true;
+        auto& state = State::Instance();
+        ok &= ResolveActiveFeature(sl::kFeatureDLSS_G, "slDLSSGSetOptions", _slDLSSGSetOptions, state.optiSlDLSSG);
+        ok &= ResolveActiveFeature(sl::kFeatureDLSS_G, "slDLSSGGetState", _slDLSSGGetState, state.optiSlDLSSG);
+        ok &= ResolveActiveFeature(sl::kFeatureReflex, "slReflexGetState", _slReflexGetState, state.optiSlReflex);
+        ok &= ResolveActiveFeature(sl::kFeatureReflex, "slReflexSleep", _slReflexSleep, state.optiSlReflex);
+        ok &= ResolveActiveFeature(sl::kFeatureReflex, "slReflexSetOptions", _slReflexSetOptions, state.optiSlReflex);
+        ResolveActiveFeature(sl::kFeatureReflex, "slReflexSetCameraData", _slReflexSetCameraData, state.optiSlReflex,
+                             false);
+        ResolveActiveFeature(sl::kFeatureReflex, "slReflexGetPredictedCameraData", _slReflexGetPredictedCameraData,
+                             state.optiSlReflex, false);
+        ResolveActiveFeature(sl::kFeaturePCL, "slPCLGetState", _slPCLGetState, state.optiSlPCL, false);
+        ok &= ResolveActiveFeature(sl::kFeaturePCL, "slPCLSetMarker", _slPCLSetMarker, state.optiSlPCL);
+        ok &= ResolveActiveFeature(sl::kFeaturePCL, "slPCLSetOptions", _slPCLSetOptions, state.optiSlPCL);
+        LOG_INFO("Active Streamline feature binding: {}", ok);
+        return ok;
+    }
+
+    static bool DisableReflex()
+    {
+        sl::ReflexOptions options {};
+        options.mode = sl::ReflexMode::eOff;
+        options.useMarkersToOptimize = false;
+
+        return _slReflexSetOptions(options) == sl::Result::eOk;
+    }
+
+    // The part shared by D3D12 and Vulkan, before setting the device
+    static bool InitStreamline(sl::RenderAPI renderApi)
+    {
         if (!StreamlineProxy::LoadStreamline())
             return false;
 
@@ -306,18 +385,19 @@ class StreamlineProxy
         pref.applicationId = 0x0F71CA1E;
         pref.featuresToLoad = featuresToLoad;
         pref.numFeaturesToLoad = static_cast<uint32_t>(std::size(featuresToLoad));
-        pref.renderAPI = sl::RenderAPI::eD3D12;
+        pref.renderAPI = renderApi;
 
         pref.flags |= sl::PreferenceFlags::eUseManualHooking;
         pref.flags |= sl::PreferenceFlags::eUseFrameBasedResourceTagging;
-        pref.flags |= sl::PreferenceFlags::eUseDXGIFactoryProxy;
         pref.flags &= ~sl::PreferenceFlags::eAllowOTA;
         pref.flags &= ~sl::PreferenceFlags::eLoadDownloadedPlugins;
 
-        auto exePath = Util::ExePath().remove_filename();
-        auto nvngxDlssPath = Util::FindFilePath(exePath, "nvngx_dlss.dll");
-        auto nvngxDlssDPath = Util::FindFilePath(exePath, "nvngx_dlssd.dll");
-        auto nvngxDlssGPath = Util::FindFilePath(exePath, "nvngx_dlssg.dll");
+        if (renderApi == sl::RenderAPI::eD3D12)
+            pref.flags |= sl::PreferenceFlags::eUseDXGIFactoryProxy;
+
+        std::optional<std::filesystem::path> nvngxDlssPath = State::Instance().NVNGX_DLSS_Path;
+        std::optional<std::filesystem::path> nvngxDlssDPath = State::Instance().NVNGX_DLSSD_Path;
+        std::optional<std::filesystem::path> nvngxDlssGPath = State::Instance().NVNGX_DLSSG_Path;
 
         std::vector<std::wstring> pathStorage;
 
@@ -348,8 +428,7 @@ class StreamlineProxy
         pref.numPathsToPlugins = (uint32_t) paths.size();
 
         auto owner = State::GetOwner();
-        if (State::Instance().activeFgOutput == FGOutput::DLSSG &&
-            State::Instance().activeFgNvngx != FGNvngxReplacement::None)
+        if (State::Instance().activeFgOutput == FGOutput::DLSSG)
         {
             State::DisableChecks(owner, "sl.");
         }
@@ -358,37 +437,92 @@ class StreamlineProxy
             State::DisableChecks(owner);
         }
 
+        _isInitializing = true;
         auto initResult = StreamlineProxy::Init()(pref, sl::kSDKVersion);
+        _isInitializing = false;
 
-        State::EnableChecks(owner);
-
-        if (initResult == sl::Result::eOk)
+        sl::AdapterInfo adapterInfo {};
+        if (StreamlineProxy::IsFeatureSupported()(sl::kFeatureDLSS_G, adapterInfo) != sl::Result::eOk)
         {
-            State::Instance().optiSlDLSSG = StreamlineProxy::HookStreamlineDLSSG();
-            State::Instance().optiSlReflex = StreamlineProxy::HookStreamlineReflex();
-            State::Instance().optiSlPCL = StreamlineProxy::HookStreamlinePCL();
-
-            if (State::Instance().gameQuirks & GameQuirk::CreateSLOnThe2ndDevice)
+            if (State::Instance().activeFgNvngx == FGNvngxReplacement::None)
             {
-                // slSetD3DDevice moved to hkD3D12CreateDevice
-                _isD3D12Inited = true;
+                Config::Instance()->FGNvngxReplacement = FGNvngxReplacement::Nukems;
+                Config::Instance()->SaveIni();
+
+                MessageBoxW(NULL,
+                            L"You've tried to use real DLSSG, but it's not supported\n"
+                            "Opti will try to use a replacement, restart the game",
+                            L"No DLSSG Support", MB_ICONWARNING | MB_OK);
+
+                std::exit(1);
             }
             else
             {
-                auto result = _slSetD3DDevice(device);
-                if (result == sl::Result::eOk)
-                {
-                    auto reflexConst = sl::ReflexOptions {};
-                    reflexConst.mode = sl::ReflexMode::eOff;
-                    reflexConst.useMarkersToOptimize = false;
-
-                    result = _slReflexSetOptions(reflexConst);
-                    _isD3D12Inited = result == sl::Result::eOk;
-                }
+                LOG_ERROR("FG Nvngx replacement was selected but SL failed to init DLSSG");
             }
         }
 
+        State::EnableChecks(owner);
+
+        return initResult == sl::Result::eOk;
+    }
+
+    static bool InitWithD3D12(ID3D12Device* device)
+    {
+        if (_isD3D12Inited)
+            return true;
+
+        // A Vulkan game's D3D12 devices, like the ones for interop, don't get it back
+        if (_isVulkanRequested)
+        {
+            LOG_ERROR("Streamline is already initialized for Vulkan");
+            return false;
+        }
+
+        _isD3D12Requested = true;
+
+        if (!InitStreamline(sl::RenderAPI::eD3D12))
+            return false;
+
+        // slSetD3DDevice moved to hkD3D12CreateDevice
+        if (State::Instance().gameQuirks & GameQuirk::CreateSLOnThe2ndDevice)
+            _isD3D12Inited = true;
+        else
+            _isD3D12Inited = SetD3D12Device(device, true) == sl::Result::eOk && DisableReflex();
+
         return _isD3D12Inited;
+    }
+
+    // Streamline adds its queues, extensions and features to the device, so this goes before vkCreateDevice
+    static bool InitWithVulkan()
+    {
+        if (_isVulkanRequested)
+            return true;
+
+        // Streamline can only be initialized once per process, reinitializing crashes in its plugins
+        if (_isD3D12Requested)
+        {
+            LOG_ERROR("Streamline is already initialized for D3D12");
+            return false;
+        }
+
+        _isVulkanRequested = InitStreamline(sl::RenderAPI::eVulkan);
+        return _isVulkanRequested;
+    }
+
+    static bool SetVulkanInfo(const sl::VulkanInfo& info)
+    {
+        if (_isVulkanInited)
+            return true;
+
+        if (!_isVulkanRequested || _slSetVulkanInfo == nullptr)
+            return false;
+
+        auto result = _slSetVulkanInfo(info);
+        LOG_INFO("slSetVulkanInfo result: {}", (int) result);
+
+        _isVulkanInited = result == sl::Result::eOk && BindActiveFeatures() && DisableReflex();
+        return _isVulkanInited;
     }
 
     static bool InitWithD3D11(ID3D11Device* device)
@@ -434,6 +568,9 @@ class StreamlineProxy
 
     static bool IsD3D12Inited() { return _isD3D12Inited; }
 
+    // Its plugins create temporary Vulkan instances while loading
+    static bool IsInitializing() { return _isInitializing; }
+
     static PFN_slInit Init() { return _slInit; }
     static PFN_slShutdown Shutdown() { return _slShutdown; }
     static PFN_slIsFeatureSupported IsFeatureSupported() { return _slIsFeatureSupported; }
@@ -451,7 +588,9 @@ class StreamlineProxy
     static PFN_slGetNativeInterface GetNativeInterface() { return _slGetNativeInterface; }
     static PFN_slGetFeatureFunction GetFeatureFunction() { return _slGetFeatureFunction; }
     static PFN_slGetNewFrameToken GetNewFrameToken() { return _slGetNewFrameToken; }
-    static PFN_slSetD3DDevice SetD3DDevice() { return _slSetD3DDevice; }
+    static PFN_slSetD3DDevice SetD3DDevice() { return &SetD3DDeviceAndBind; }
+    // Streamline's Vulkan functions, the ones it doesn't intercept come from vulkan-1.dll
+    static PFN_vkGetDeviceProcAddr VkGetDeviceProcAddr() { return _vkGetDeviceProcAddr; }
     static PFN_CreateDxgiFactory CreateDxgiFactory() { return _slCreateDxgiFactory; }
     static PFN_CreateDxgiFactory1 CreateDxgiFactory1() { return _slCreateDxgiFactory1; }
     static PFN_CreateDxgiFactory2 CreateDxgiFactory2() { return _slCreateDxgiFactory2; }
@@ -475,6 +614,10 @@ class StreamlineProxy
     inline static bool _isInited = false;
     inline static bool _isD3D11Inited = false;
     inline static bool _isD3D12Inited = false;
+    inline static bool _isD3D12Requested = false;
+    inline static bool _isVulkanInited = false;
+    inline static bool _isVulkanRequested = false;
+    inline static bool _isInitializing = false;
 
     // Interposer
     inline static PFN_slInit _slInit = nullptr;
@@ -495,6 +638,8 @@ class StreamlineProxy
     inline static PFN_slGetFeatureFunction _slGetFeatureFunction = nullptr;
     inline static PFN_slGetNewFrameToken _slGetNewFrameToken = nullptr;
     inline static PFN_slSetD3DDevice _slSetD3DDevice = nullptr;
+    inline static PFN_slSetVulkanInfo _slSetVulkanInfo = nullptr;
+    inline static PFN_vkGetDeviceProcAddr _vkGetDeviceProcAddr = nullptr;
     inline static PFN_CreateDxgiFactory _slCreateDxgiFactory = nullptr;
     inline static PFN_CreateDxgiFactory1 _slCreateDxgiFactory1 = nullptr;
     inline static PFN_CreateDxgiFactory2 _slCreateDxgiFactory2 = nullptr;

@@ -1,11 +1,13 @@
 #include "pch.h"
 #include "FfxApi_Dx12.h"
+#include "NVNGX_DLSS.h"
 
 #include "Util.h"
 #include "Config.h"
 
 #include "resource.h"
 #include "NVNGX_Parameter.h"
+#include <proxies/Nvngx_Proxy.h>
 #include "proxies/FfxApi_Proxy.h"
 
 #include "FG/FfxApi_Dx12_FG.h"
@@ -18,8 +20,10 @@
 static std::unordered_map<ffxContext, ffxCreateContextDescUpscale> _initParams;
 static std::unordered_map<ffxContext, NVSDK_NGX_Parameter*> _nvParams;
 static std::unordered_map<ffxContext, NVSDK_NGX_Handle*> _contexts;
-static ID3D12Device* _d3d12Device = nullptr;
-static bool _nvnxgInited = false;
+static std::atomic<ID3D12Device*> _d3d12Device { nullptr };
+// Device this input initialised NGX with
+static std::atomic<ID3D12Device*> _nvngxDevice { nullptr };
+static bool _nvngxInited = false;
 static float qualityRatios[] = { 1.0f, 1.5f, 1.7f, 2.0f, 3.0f };
 static size_t _contextCounter = 0x00001ee7;
 
@@ -87,6 +91,8 @@ static bool CreateDLSSContext(ffxContext handle, const ffxDispatchDescUpscale* p
     if ((initParams->flags & FFX_UPSCALE_ENABLE_DISPLAY_RESOLUTION_MOTION_VECTORS) == 0)
         initFlags |= NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
 
+    State::Instance().dynamicResolution = (initParams->flags & FFX_UPSCALE_ENABLE_DYNAMIC_RESOLUTION) != 0;
+
     params->Set(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, initFlags);
 
     params->Set(NVSDK_NGX_Parameter_Width, pExecParams->renderSize.width);
@@ -102,7 +108,7 @@ static bool CreateDLSSContext(ffxContext handle, const ffxDispatchDescUpscale* p
 
     LOG_INFO("renderWidth: {}, maxWidth: {}, ratio: {}", pExecParams->renderSize.width, width, ratio);
 
-    if (ratio <= 3.0 && ratio > 2.0)
+    if (ratio > 2.0)
         params->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_UltraPerformance);
     else if (ratio <= 2.0 && ratio > 1.7)
         params->Set(NVSDK_NGX_Parameter_PerfQualityValue, NVSDK_NGX_PerfQuality_Value_MaxPerf);
@@ -257,19 +263,21 @@ ffxReturnCode_t ffxCreateContext_Dx12(ffxContext* context, ffxCreateContextDescH
             return ffxApiResult;
     }
 
-    if (!state.nvngxDx12Inited)
+    // Re-initialise NGX when the device this input initialised it with was replaced
+    if (!state.nvngxDx12Inited || (_nvngxInited && _nvngxDevice.load() != _d3d12Device.load()))
     {
         NVSDK_NGX_FeatureCommonInfo fcInfo {};
         auto exePath = Util::ExePath().remove_filename();
 
-        auto nvResult = NVSDK_NGX_D3D12_Init_with_ProjectID(
-            OPTI_GUID, state.NVNGX_Engine, OPTI_VERSION, exePath.c_str(), _d3d12Device, &fcInfo,
-            state.NVNGX_Version == 0 ? NVSDK_NGX_Version_API : state.NVNGX_Version);
+        auto nvResult =
+            NVNGXDx12InputInit(OPTI_GUID, state.NVNGX_Engine, OPTI_VERSION, exePath.c_str(), _d3d12Device, &fcInfo,
+                               state.NVNGX_Version == 0 ? NVSDK_NGX_Version_API : state.NVNGX_Version);
 
         if (nvResult != NVSDK_NGX_Result_Success)
             return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
 
-        _nvnxgInited = true;
+        _nvngxDevice = _d3d12Device.load();
+        _nvngxInited = true;
     }
 
     if (!Config::Instance()->EnableHotSwapping.value_or_default())
@@ -322,7 +330,11 @@ ffxReturnCode_t ffxDestroyContext_Dx12(ffxContext* context, const ffxAllocationC
         NVSDK_NGX_D3D12_ReleaseFeature(_contexts[*context]);
 
     _contexts.erase(*context);
-    _nvParams.erase(*context);
+    if (auto it = _nvParams.find(*context); it != _nvParams.end())
+    {
+        TryDestroyNGXParameters(it->second, NVNGXProxy::D3D12_DestroyParameters());
+        _nvParams.erase(it);
+    }
     _initParams.erase(*context);
 
     if (upscalerContext && !Config::Instance()->EnableHotSwapping.value_or_default())
@@ -403,6 +415,14 @@ ffxReturnCode_t ffxQuery_Dx12(ffxContext* context, ffxQueryDescHeader* desc)
 
     auto type = FfxApiProxy::GetIndirectType(desc);
     LOG_DEBUG("Header type: {}, Indirect type: {}", FfxApiProxy::GetTypeName(desc->type), magic_enum::enum_name(type));
+
+    if (desc->type == FFX_API_QUERY_DESC_TYPE_GET_VERSIONS && type == FFXStructType::Upscaling &&
+        State::Instance().gameQuirks & GameQuirk::HideFsr4)
+    {
+        return FfxApiProxy::QueryUpscalerVersionsWithoutFsr4(reinterpret_cast<ffxQueryDescGetVersions*>(desc),
+                                                             [context](ffxQueryDescHeader* query)
+                                                             { return FfxApiProxy::D3D12_Query(context, query); });
+    }
 
     if (type == FFXStructType::SwapchainDX12 || type == FFXStructType::FG)
     {
@@ -628,9 +648,18 @@ ffxReturnCode_t ffxDispatch_Dx12(ffxContext* context, ffxDispatchDescHeader* des
     params->Set(NVSDK_NGX_Parameter_Depth, dispatchDesc->depth.resource);
     params->Set(NVSDK_NGX_Parameter_ExposureTexture, dispatchDesc->exposure.resource);
 
-    if (dispatchDesc->reactive.description.width >= dispatchDesc->renderSize.width &&
-        dispatchDesc->reactive.description.height >= dispatchDesc->renderSize.height)
-        params->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, dispatchDesc->reactive.resource);
+    // Masks smaller than the render size are not used, params keep last frame's values otherwise
+    auto reactive = (dispatchDesc->reactive.description.width >= dispatchDesc->renderSize.width &&
+                     dispatchDesc->reactive.description.height >= dispatchDesc->renderSize.height)
+                        ? dispatchDesc->reactive.resource
+                        : nullptr;
+
+    auto transparency = (dispatchDesc->transparencyAndComposition.description.width >= dispatchDesc->renderSize.width &&
+                         dispatchDesc->transparencyAndComposition.description.height >= dispatchDesc->renderSize.height)
+                            ? dispatchDesc->transparencyAndComposition.resource
+                            : nullptr;
+
+    params->Set(NVSDK_NGX_Parameter_DLSS_Input_Bias_Current_Color_Mask, reactive);
 
     params->Set(NVSDK_NGX_Parameter_Color, dispatchDesc->color.resource);
     params->Set(NVSDK_NGX_Parameter_MotionVectors, dispatchDesc->motionVectors.resource);
@@ -641,13 +670,8 @@ ffxReturnCode_t ffxDispatch_Dx12(ffxContext* context, ffxDispatchDescHeader* des
     params->Set("FSR.frameTimeDelta", dispatchDesc->frameTimeDelta);
     params->Set("FSR.viewSpaceToMetersFactor", dispatchDesc->viewSpaceToMetersFactor);
 
-    if (dispatchDesc->transparencyAndComposition.description.width >= dispatchDesc->renderSize.width &&
-        dispatchDesc->transparencyAndComposition.description.height >= dispatchDesc->renderSize.height)
-        params->Set("FSR.transparencyAndComposition", dispatchDesc->transparencyAndComposition.resource);
-
-    if (dispatchDesc->reactive.description.width >= dispatchDesc->renderSize.width &&
-        dispatchDesc->reactive.description.height >= dispatchDesc->renderSize.height)
-        params->Set("FSR.reactive", dispatchDesc->reactive.resource);
+    params->Set("FSR.transparencyAndComposition", transparency);
+    params->Set("FSR.reactive", reactive);
 
     params->Set(NVSDK_NGX_Parameter_Sharpness, dispatchDesc->sharpness);
     params->Set("FSR.upscaleSize.width", dispatchDesc->upscaleSize.width);
@@ -666,4 +690,13 @@ ffxReturnCode_t ffxDispatch_Dx12(ffxContext* context, ffxDispatchDescHeader* des
 
     LOG_ERROR("evalResult: {:X}", (UINT) evalResult);
     return FFX_API_RETURN_ERROR_RUNTIME_ERROR;
+}
+
+void FfxApiDx12DeviceDestroyed(IUnknown* device)
+{
+    ID3D12Device* expected = (ID3D12Device*) device;
+    _d3d12Device.compare_exchange_strong(expected, nullptr);
+
+    expected = (ID3D12Device*) device;
+    _nvngxDevice.compare_exchange_strong(expected, nullptr);
 }

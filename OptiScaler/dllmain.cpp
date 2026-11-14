@@ -6,6 +6,9 @@
 #include "Logger.h"
 #include "resource.h"
 #include "DllNames.h"
+#include "BuildInfo.h"
+#include "misc/GameConfigs.h"
+#include "plugins/PluginApi.h"
 
 #include "proxies/Dxgi_Proxy.h"
 #include "proxies/Kernel32_Proxy.h"
@@ -16,7 +19,7 @@
 #include <proxies/XeSS_Proxy.h>
 #include <proxies/XeFG_Proxy.h>
 #include <proxies/XeLL_Proxy.h>
-#include <proxies/NVNGX_Proxy.h>
+#include <proxies/Nvngx_Proxy.h>
 #include <proxies/FfxApi_Proxy.h>
 
 #include "inputs/FSR2_Dx11.h"
@@ -24,9 +27,9 @@
 #include "inputs/FSR2_Vk.h"
 #include "inputs/FSR3_Dx12.h"
 #include "inputs/FG/FSR3_Dx12_FG.h"
+#include "inputs/FG/XeFG_Inputs_Dx12.h"
 
-#include <fsr4/FSR4ModelSelection.h>
-
+#include <hooks/Amdxc64_Hooks.h>
 #include <hooks/Dxgi_Hooks.h>
 #include <hooks/D3D11_Hooks.h>
 #include <hooks/D3D12_Hooks.h>
@@ -47,11 +50,13 @@
 #include <magic_enum.hpp>
 #include <version_check.h>
 #include <misc/IdentifyGpu.h>
+#include <misc/CrashDumps.h>
 #include <sha1/sha1.hpp>
 
 static std::vector<HMODULE> _asiHandles;
 static std::vector<std::filesystem::directory_entry> _lateLoadingEntries;
 static bool _passThruMode = false;
+static bool _staticLoad = false;
 
 typedef const char*(CDECL* PFN_wine_get_version)(void);
 typedef void (*PFN_InitializeASI)(void);
@@ -125,6 +130,25 @@ static bool IsRunningOnWine()
     return false;
 }
 
+uint32_t CheckAgilitySDK(HMODULE exe)
+{
+    auto version = reinterpret_cast<const uint32_t*>(GetProcAddress(exe, "D3D12SDKVersion"));
+    auto path = reinterpret_cast<const char* const*>(GetProcAddress(exe, "D3D12SDKPath"));
+
+    LOG_INFO(" ");
+
+    if (version && path)
+    {
+        LOG_INFO("Agility SDK Version: {}", *version);
+        LOG_INFO("Agility SDK Path: {}", *path);
+
+        return *version;
+    }
+
+    LOG_INFO("Agility SDK exports missing");
+    return 0;
+}
+
 UINT customD3D12SDKVersion = 615;
 
 static void RunAgilityUpgrade(HMODULE dx12Module)
@@ -168,26 +192,39 @@ static void RunAgilityUpgrade(HMODULE dx12Module)
 
             if (!pathSet)
             {
-                std::wstring widePath = Config::Instance()->MainDllPath.value();
-                widePath = std::filesystem::relative(widePath, Util::ExePath().parent_path());
-                widePath = widePath + L"\\D3D12_OptiScaler\\";
+                std::error_code ec;
+                std::wstring widePath = std::filesystem::relative(Config::Instance()->MainDllPath.value(),
+                                                                  Util::ExePath().parent_path(), ec);
 
-                // Properly convert wstring → string
-                int size = WideCharToMultiByte(CP_UTF8, 0, widePath.c_str(), -1, nullptr, 0, nullptr, nullptr);
-                path.resize(size - 1);
-                WideCharToMultiByte(CP_UTF8, 0, widePath.c_str(), -1, path.data(), size, nullptr, nullptr);
+                // SDK path must be relative to the exe, not possible across drives
+                if (!widePath.empty())
+                {
+                    widePath = widePath + L"\\D3D12_OptiScaler\\";
+
+                    // Properly convert wstring → string
+                    int size = WideCharToMultiByte(CP_UTF8, 0, widePath.c_str(), -1, nullptr, 0, nullptr, nullptr);
+                    path.resize(size - 1);
+                    WideCharToMultiByte(CP_UTF8, 0, widePath.c_str(), -1, path.data(), size, nullptr, nullptr);
+                }
 
                 pathSet = true;
             }
 
-            hr = sdkConfig->SetSDKVersion(customD3D12SDKVersion, reinterpret_cast<LPCSTR>(path.c_str()));
-            if (FAILED(hr))
+            if (path.empty())
             {
-                LOG_ERROR("Failed to upgrade Agility SDK: {0}", hr);
+                LOG_ERROR("Can't upgrade Agility SDK, Opti folder isn't reachable from the exe folder");
             }
             else
             {
-                LOG_INFO("Agility SDK upgraded successfully");
+                hr = sdkConfig->SetSDKVersion(customD3D12SDKVersion, reinterpret_cast<LPCSTR>(path.c_str()));
+                if (FAILED(hr))
+                {
+                    LOG_ERROR("Failed to upgrade Agility SDK: {0}", hr);
+                }
+                else
+                {
+                    LOG_INFO("Agility SDK upgraded successfully");
+                }
             }
         }
         else
@@ -206,6 +243,22 @@ static void RunAgilityUpgrade(HMODULE dx12Module)
         LOG_ERROR("Failed to detach detour: {:X}", detourResult);
         return;
     }
+}
+
+// Remembers the plugin for the menu
+static void RegisterLoadedAsi(const std::filesystem::path& path)
+{
+    std::string name = wstring_to_string(path.filename().wstring()); // .string() can crash
+    std::string version = Util::GetFileVersionString(path.wstring());
+    auto& state = State::Instance();
+    std::lock_guard<std::mutex> lock(state.loadedAsiPluginsMutex);
+    // Late-load entries can be handled more than once
+    for (const auto& plugin : state.loadedAsiPlugins)
+    {
+        if (plugin.name == name)
+            return;
+    }
+    state.loadedAsiPlugins.push_back({ name, version });
 }
 
 void LoadAsiPlugins()
@@ -232,12 +285,13 @@ void LoadAsiPlugins()
             std::transform(fileName.begin(), fileName.end(), fileName.begin(),
                            [](wchar_t c) { return std::towlower(c); });
 
-            HMODULE hMod = nullptr;
-
             if (fileName.rfind(L"-loadlate") != std::wstring::npos)
+            {
                 _lateLoadingEntries.push_back(entry);
-            else
-                hMod = NtdllProxy::LoadLibraryExW_Ldr(entry.path().c_str(), NULL, 0);
+                continue;
+            }
+
+            HMODULE hMod = NtdllProxy::LoadLibraryExW_Ldr(entry.path().c_str(), NULL, 0);
 
             if (hMod != nullptr)
             {
@@ -247,8 +301,14 @@ void LoadAsiPlugins()
                 auto init = (PFN_InitializeASI) KernelBaseProxy::GetProcAddress_()(hMod, "InitializeASI");
                 auto patchResult = (PFN_PatchResult) KernelBaseProxy::GetProcAddress_()(hMod, "PatchResult");
 
+                RegisterLoadedAsi(entry.path());
+
                 if (init != nullptr)
                     init();
+
+                PluginApi::InitPlugin(
+                    hMod, (PFN_OptiPluginInit) KernelBaseProxy::GetProcAddress_()(hMod, OPTI_PLUGIN_INIT_NAME),
+                    entry.path());
 
                 if (patchResult != nullptr)
                 {
@@ -280,76 +340,239 @@ void LoadAsiPlugins()
                 DWORD err = GetLastError();
                 LOG_ERROR(L"Failed to load: {}, error {:X}", entry.path().wstring(), err);
             }
+        }
+    }
 
-            if (_lateLoadingEntries.size() > 0)
+    if (_lateLoadingEntries.size() > 0)
+    {
+        std::thread(
+            []()
             {
-                std::thread(
-                    []()
+                try
+                {
+
+                    auto delay = Config::Instance()->LateAsiPluginsDelay.value_or_default();
+                    LOG_INFO("Waiting {} seconds before loading late-load plugins...", delay);
+                    std::this_thread::sleep_for(std::chrono::seconds(delay));
+
+                    for (const auto& entry : _lateLoadingEntries)
                     {
-                        try
+                        HMODULE hMod = NtdllProxy::LoadLibraryExW_Ldr(entry.path().c_str(), NULL, 0);
+
+                        if (hMod != nullptr)
                         {
+                            LOG_INFO(L"Loaded late: {}", entry.path().wstring());
+                            _asiHandles.push_back(hMod);
 
-                            auto delay = Config::Instance()->LateAsiPluginsDelay.value_or_default();
-                            LOG_INFO("Waiting {} seconds before loading late-load plugins...", delay);
-                            std::this_thread::sleep_for(std::chrono::seconds(delay));
+                            auto init = (PFN_InitializeASI) KernelBaseProxy::GetProcAddress_()(hMod, "InitializeASI");
 
-                            for (const auto& entry : _lateLoadingEntries)
+                            auto patchResult =
+                                (PFN_PatchResult) KernelBaseProxy::GetProcAddress_()(hMod, "PatchResult");
+
+                            RegisterLoadedAsi(entry.path());
+
+                            if (init != nullptr)
+                                init();
+
+                            PluginApi::InitPlugin(
+                                hMod,
+                                (PFN_OptiPluginInit) KernelBaseProxy::GetProcAddress_()(hMod, OPTI_PLUGIN_INIT_NAME),
+                                entry.path());
+
+                            if (patchResult != nullptr)
                             {
-                                HMODULE hMod = NtdllProxy::LoadLibraryExW_Ldr(entry.path().c_str(), NULL, 0);
-
-                                if (hMod != nullptr)
+                                auto pr = patchResult();
+                                if (pr)
                                 {
-                                    LOG_INFO(L"Loaded late: {}", entry.path().wstring());
-                                    _asiHandles.push_back(hMod);
+                                    LOG_INFO("Game patching is successful");
+                                    State::Instance().isOptiPatcherSucceed = true;
+                                    LOG_INFO("Disabling spoofing");
 
-                                    auto init =
-                                        (PFN_InitializeASI) KernelBaseProxy::GetProcAddress_()(hMod, "InitializeASI");
+                                    if (!Config::Instance()->DxgiSpoofing.has_value())
+                                        Config::Instance()->DxgiSpoofing.set_volatile_value(false);
 
-                                    auto patchResult =
-                                        (PFN_PatchResult) KernelBaseProxy::GetProcAddress_()(hMod, "PatchResult");
-
-                                    if (init != nullptr)
-                                        init();
-
-                                    if (patchResult != nullptr)
+                                    if (!Config::Instance()->VulkanSpoofing.has_value() ||
+                                        !Config::Instance()->VulkanSpoofing.value_for_config())
                                     {
-                                        auto pr = patchResult();
-                                        if (pr)
-                                        {
-                                            LOG_INFO("Game patching is successful");
-                                            State::Instance().isOptiPatcherSucceed = true;
-                                            LOG_INFO("Disabling spoofing");
-
-                                            if (!Config::Instance()->DxgiSpoofing.has_value())
-                                                Config::Instance()->DxgiSpoofing.set_volatile_value(false);
-
-                                            if (!Config::Instance()->VulkanSpoofing.has_value() ||
-                                                !Config::Instance()->VulkanSpoofing.value_for_config())
-                                            {
-                                                Config::Instance()->VulkanSpoofing.set_volatile_value(false);
-                                            }
-
-                                            if (!Config::Instance()->VulkanExtensionSpoofing.has_value())
-                                                Config::Instance()->VulkanExtensionSpoofing.set_volatile_value(false);
-                                        }
+                                        Config::Instance()->VulkanSpoofing.set_volatile_value(false);
                                     }
-                                }
-                                else
-                                {
-                                    DWORD err = GetLastError();
-                                    LOG_ERROR(L"Failed to load: {}, error {:X}", entry.path().wstring(), err);
+
+                                    if (!Config::Instance()->VulkanExtensionSpoofing.has_value())
+                                        Config::Instance()->VulkanExtensionSpoofing.set_volatile_value(false);
                                 }
                             }
                         }
-                        catch (...)
+                        else
                         {
-                            LOG_ERROR("Exception occurred while loading late-load plugins");
+                            DWORD err = GetLastError();
+                            LOG_ERROR(L"Failed to load: {}, error {:X}", entry.path().wstring(), err);
                         }
-                    })
-                    .detach();
-            }
-        }
+                    }
+                }
+                catch (...)
+                {
+                    LOG_ERROR("Exception occurred while loading late-load plugins");
+                }
+            })
+            .detach();
     }
+}
+
+// With Luma, both are loaded after its D3D12 device creation, Special K loads ReShade too
+static bool ShouldLoadSpecialK()
+{
+    return skModule == nullptr && Config::Instance()->LoadSpecialK.value_or_default() &&
+           !Config::Instance()->CreateD3D12DeviceForLuma.value_or_default();
+}
+
+static bool ShouldLoadReShade()
+{
+    return reshadeModule == nullptr && Config::Instance()->LoadReShade.value_or_default() &&
+           !Config::Instance()->CreateD3D12DeviceForLuma.value_or_default();
+}
+
+static bool ShouldLoadForLuma()
+{
+    return Config::Instance()->CreateD3D12DeviceForLuma.value_or_default() &&
+           ((skModule == nullptr && Config::Instance()->LoadSpecialK.value_or_default()) ||
+            (reshadeModule == nullptr && Config::Instance()->LoadReShade.value_or_default()));
+}
+
+static void LoadInjectedDlls()
+{
+    // No RESHADE_DISABLE_GRAPHICS_HOOK, Special K sets it itself when it wants ReShade without hooks
+    if (ShouldLoadSpecialK())
+    {
+        auto skFile = Util::ExePath().parent_path() / L"SpecialK64.dll";
+
+        State::EnableServeOriginal(200);
+        skModule = NtdllProxy::LoadLibraryExW_Ldr(skFile.c_str(), NULL, 0);
+        State::DisableServeOriginal(200);
+
+        LOG_INFO("Loading SpecialK64.dll, result: {0:X}", (UINT64) skModule);
+    }
+
+    // Special K loads ReShade itself
+    if (ShouldLoadReShade() && skModule != nullptr)
+    {
+        LOG_WARN("Special K is loaded, skipping ReShade");
+    }
+    else if (ShouldLoadReShade())
+    {
+        auto rsFile = Util::ReShadePath();
+        SetEnvironmentVariableW(L"RESHADE_DISABLE_LOADING_CHECK", L"1");
+
+        State::EnableServeOriginal(201);
+        reshadeModule = NtdllProxy::LoadLibraryExW_Ldr(rsFile.c_str(), NULL, 0);
+        State::DisableServeOriginal(201);
+
+        LOG_INFO("Loading {}, result: {:X}", rsFile.filename().string(), (size_t) reshadeModule);
+    }
+}
+
+DWORD WINAPI getGpuInfo(LPVOID hModuleVoid);
+
+typedef int(WINAPI* PFN_ExeEntry)(PVOID);
+static PFN_ExeEntry o_ExeEntry = nullptr;
+static std::atomic<bool> _entryLoadsStarted = false;
+static std::atomic<bool> _entryLoadsDone = false;
+
+// Not call_once, an asi creating a factory while loading would call this again
+static void RunEntryLoads()
+{
+    if (_entryLoadsStarted.exchange(true))
+        return;
+
+    // hkExeEntry waits for it, also when a load throws on another thread
+    struct DoneGuard
+    {
+        ~DoneGuard()
+        {
+            _entryLoadsDone = true;
+            _entryLoadsDone.notify_all();
+        }
+    } doneGuard;
+
+    LOG_INFO("Loading injected dlls");
+
+    // Special K and ReShade should hook before us, ReShade above our FG swapchain uses freed objects
+    if ((skModule != nullptr || !Config::Instance()->LoadSpecialK.value_or_default()) &&
+        !Config::Instance()->LoadReShade.value_or_default())
+        DxgiHooks::HookFactoryMethods();
+
+    // Detection fails under the loader lock, nvapi loaded by an injected dll's DllMain would pick fakenvapi
+    IdentifyGpu::getAllGpus();
+
+    DxgiHooks::LoadForLuma();
+    LoadInjectedDlls();
+
+    // Started here to not create a factory together with the one above
+    CreateThread(nullptr, 0, getGpuInfo, GetDllNameWModule(&dx12NamesW), 0, nullptr);
+}
+
+static int WINAPI hkExeEntry(PVOID param)
+{
+    // Restores the entry for anything checking the exe code
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourDetach(&(PVOID&) o_ExeEntry, hkExeEntry);
+    DetourTransactionCommit();
+
+    RunEntryLoads();
+
+    // Another thread's factory creation can run the loads, game code shouldn't start before they finish
+    _entryLoadsDone.wait(false);
+
+    return o_ExeEntry(param);
+}
+
+// TLS callbacks run before the entry, protectors (Denuvo, VMProtect) use them to check the exe code
+static bool ExeHasTlsCallbacks()
+{
+    auto base = (BYTE*) exeModule;
+    auto dosHeader = (IMAGE_DOS_HEADER*) base;
+    auto ntHeaders = (IMAGE_NT_HEADERS*) (base + dosHeader->e_lfanew);
+    auto tlsData = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
+
+    if (tlsData.VirtualAddress == 0)
+        return false;
+
+    auto tlsDir = (IMAGE_TLS_DIRECTORY*) (base + tlsData.VirtualAddress);
+    auto callbacks = (PIMAGE_TLS_CALLBACK*) tlsDir->AddressOfCallBacks;
+
+    return callbacks != nullptr && *callbacks != nullptr;
+}
+
+// Runs after the loader lock is released and before any game code
+static bool HookExeEntry()
+{
+    if (o_ExeEntry != nullptr)
+        return true;
+
+    if (ExeHasTlsCallbacks())
+    {
+        LOG_INFO("Exe has TLS callbacks, not hooking the entry");
+        return false;
+    }
+
+    o_ExeEntry = (PFN_ExeEntry) DetourGetEntryPoint(nullptr);
+
+    if (o_ExeEntry == nullptr)
+        return false;
+
+    DetourTransactionBegin();
+    DetourUpdateThread(GetCurrentThread());
+    DetourAttach(&(PVOID&) o_ExeEntry, hkExeEntry);
+
+    if (DetourTransactionCommit() != NO_ERROR)
+    {
+        LOG_ERROR("Can't hook the exe entry, loading now");
+        o_ExeEntry = nullptr;
+        return false;
+    }
+
+    DxgiHooks::PendingLoads = RunEntryLoads;
+    return true;
 }
 
 static void CheckWorkingMode()
@@ -994,6 +1217,14 @@ static void CheckWorkingMode()
         StreamlineHooks::hookDlss(slDlss);
     }
 
+    HMODULE slDlssd = GetDllNameWModule(&slDlssdNamesW);
+    if (slDlssd != nullptr)
+    {
+        State::Instance().postCodes |= PostCode::SlPluginsAlreadyInMemory;
+        LOG_WARN("sl.dlss_d.dll already in memory");
+        StreamlineHooks::hookDlssd(slDlssd);
+    }
+
     HMODULE slDlssg = nullptr;
     slDlssg = GetDllNameWModule(&slDlssgNamesW);
     if (slDlssg != nullptr)
@@ -1106,11 +1337,38 @@ static void CheckWorkingMode()
         FfxApiProxy::InitFfxVk(ffxVkModule);
     }
 
+    HMODULE ffxVkSRModule = nullptr;
+    ffxVkSRModule = GetDllNameWModule(&ffxVkUpscalerNamesW);
+    if (ffxVkSRModule != nullptr)
+    {
+        LOG_DEBUG("amd_fidelityfx_upscaler_vk.dll already in memory");
+        FfxApiProxy::InitFfxVk_SR(ffxVkSRModule);
+    }
+
+    HMODULE ffxVkFGModule = nullptr;
+    ffxVkFGModule = GetDllNameWModule(&ffxVkFGNamesW);
+    if (ffxVkFGModule != nullptr)
+    {
+        LOG_DEBUG("amd_fidelityfx_framegeneration_vk.dll already in memory");
+        FfxApiProxy::InitFfxVk_FG(ffxVkFGModule);
+    }
+
     // Hook kernel32 methods
     if (!Config::Instance()->EarlyHooking.value_or_default())
     {
         NtdllHooks::Hook();
         KernelHooks::Hook();
+    }
+
+    auto gameAgilityVersion = CheckAgilitySDK(exeModule);
+    if (State::Instance().isWindows10 && !State::Instance().isRunningOnLinux &&
+        !Config::Instance()->FsrAgilitySDKUpgrade.has_value())
+    {
+        if (gameAgilityVersion < customD3D12SDKVersion)
+        {
+            LOG_INFO("Enabling AgilitySDKUpgrade");
+            Config::Instance()->FsrAgilitySDKUpgrade.set_volatile_value(true);
+        }
     }
 
     // For Agility SDK Upgrade
@@ -1119,37 +1377,12 @@ static void CheckWorkingMode()
         RunAgilityUpgrade(GetDllNameWModule(&dx12NamesW));
     }
 
-    // SpecialK
-    if (skModule == nullptr && Config::Instance()->LoadSpecialK.value_or_default())
-    {
-        auto skFile = Util::ExePath().parent_path() / L"SpecialK64.dll";
-        SetEnvironmentVariableW(L"RESHADE_DISABLE_GRAPHICS_HOOK", L"1");
+    if ((ShouldLoadSpecialK() || ShouldLoadReShade()) && (!_staticLoad || !HookExeEntry()))
+        LoadInjectedDlls();
 
-        State::EnableServeOriginal(200);
-        skModule = NtdllProxy::LoadLibraryExW_Ldr(skFile.c_str(), NULL, 0);
-        State::DisableServeOriginal(200);
-
-        LOG_INFO("Loading SpecialK64.dll, result: {0:X}", (UINT64) skModule);
-    }
-
-    // ReShade
-    // Do not load Reshade here is Luma is active and we will create D3D12 device for it
-    // We will load Reshade after D3D12 device creation in that case
-    if (reshadeModule == nullptr && Config::Instance()->LoadReShade.value_or_default() &&
-        !Config::Instance()->CreateD3D12DeviceForLuma.value_or_default())
-    {
-        auto rsFile = Util::ExePath().parent_path() / L"ReShade64.dll";
-        SetEnvironmentVariableW(L"RESHADE_DISABLE_LOADING_CHECK", L"1");
-
-        if (skModule != nullptr)
-            SetEnvironmentVariableW(L"RESHADE_DISABLE_GRAPHICS_HOOK", L"1");
-
-        State::EnableServeOriginal(201);
-        reshadeModule = NtdllProxy::LoadLibraryExW_Ldr(rsFile.c_str(), NULL, 0);
-        State::DisableServeOriginal(201);
-
-        LOG_INFO("Loading ReShade64.dll, result: {0:X}", (size_t) reshadeModule);
-    }
+    // Luma's device can't be created under the loader lock, without the entry hook the first factory does it
+    if (_staticLoad && ShouldLoadForLuma())
+        HookExeEntry();
 
     // Version check
     if (Config::Instance()->CheckForUpdate.value_or_default())
@@ -1184,62 +1417,11 @@ static void printQuirks(flag_set<GameQuirk>& quirks)
     if (quirks & GameQuirk::ForceUnrealEngine)
         stringQuirks.push_back("Force detected engine as Unreal Engine");
 
-    if (quirks & GameQuirk::DisableHudfix)
-        stringQuirks.push_back("Disabling Hudfix due to known issues");
-
-    if (quirks & GameQuirk::ForceAutoExposure)
-        stringQuirks.push_back("Enabling AutoExposure");
-
-    if (quirks & GameQuirk::DisableFFXInputs)
-        stringQuirks.push_back("Disable FFX Inputs");
-
-    if (quirks & GameQuirk::DisableFSR3Inputs)
-        stringQuirks.push_back("Disable FSR 3.0 Inputs");
-
-    if (quirks & GameQuirk::DisableFSR2Inputs)
-        stringQuirks.push_back("Disable FSR 2.X Inputs");
-
-    if (quirks & GameQuirk::DisableReactiveMasks)
-        stringQuirks.push_back("Disable Reactive Masks");
-
-    if (quirks & GameQuirk::RestoreComputeSigOnNonNvidia)
-        stringQuirks.push_back("Enabling restore compute signature on AMD/Intel");
-
-    if (quirks & GameQuirk::RestoreComputeSigOnNvidia)
-        stringQuirks.push_back("Enabling restore compute signature on Nvidia");
-
-    if (quirks & GameQuirk::ExtendedSigRestore)
-        stringQuirks.push_back("Extended signatures restore");
-
-    if (quirks & GameQuirk::DisableDxgiSpoofing)
-        stringQuirks.push_back("Dxgi spoofing disabled by default");
-
-    if (quirks & GameQuirk::DisableUseFsrInputValues)
-        stringQuirks.push_back("Disable Use FSR Input Values");
-
-    if (quirks & GameQuirk::DisableOptiXessPipelineCreation)
-        stringQuirks.push_back("Disable custom pipeline creation for XeSS");
-
-    if (quirks & GameQuirk::DontUseNTShared)
-        stringQuirks.push_back("Don't use NTShared enabled");
-
-    if (quirks & GameQuirk::DontUseUnrealColorBarriers)
-        stringQuirks.push_back("Don't use color resource barrier fix for Unreal Engine games");
-
-    if (quirks & GameQuirk::DontUseUnrealMVBarriers)
-        stringQuirks.push_back("Don't use motion vector resource barrier fix for Unreal Engine games");
-
-    if (quirks & GameQuirk::SkipFirst10Frames)
-        stringQuirks.push_back("Skipping upscaling for first 10 frames");
-
     if (quirks & GameQuirk::NoFSRFGFirstSwapchain)
         stringQuirks.push_back("Skip turning the first swapchain created into an FSR swapchain");
 
     if (quirks & GameQuirk::FixSlSimulationMarkers)
         stringQuirks.push_back("Correct simulation start marker's frame id");
-
-    if (quirks & GameQuirk::DisableVsyncOverride)
-        stringQuirks.push_back("Don't use V-Sync overrides");
 
     if (quirks & GameQuirk::HitmanReflexHacks)
         stringQuirks.push_back("Hack for broken Hitman reflex");
@@ -1247,59 +1429,17 @@ static void printQuirks(flag_set<GameQuirk>& quirks)
     if (quirks & GameQuirk::SkipD3D11FeatureLevelElevation)
         stringQuirks.push_back("Skipping D3D11 feature level elevation, native FSR3.1 will be disabled!");
 
-    if (quirks & GameQuirk::DontUseNtDllHooks)
-        stringQuirks.push_back("Using kernel hooks instead of NTdll ones");
-
-    if (quirks & GameQuirk::UseFSR2PatternMatching)
-        stringQuirks.push_back("Use FSR2 pattern matching");
-
-    if (quirks & GameQuirk::AlwaysCaptureFSRFGSwapchain)
-        stringQuirks.push_back("Always capture FSR-FG swapchain");
-
-    if (quirks & GameQuirk::AllowedFrameAhead2)
-        stringQuirks.push_back("Allowed Frame Ahead: 2");
-
-    if (quirks & GameQuirk::DisableXeFGChecks)
-        stringQuirks.push_back("Skip pre init checks for XeFG");
-
     if (quirks & GameQuirk::CreateD3D12DeviceForLuma)
         stringQuirks.push_back("Create D3D12 device for Luma before loading Reshade");
 
     if (quirks & GameQuirk::LoadVulkanManually)
         stringQuirks.push_back("Load vulkan-1.dll");
 
-    if (quirks & GameQuirk::UseFsr2Dx11Inputs)
-        stringQuirks.push_back("Use FSR2 DX11 inputs");
-
-    if (quirks & GameQuirk::UseFsr2VulkanInputs)
-        stringQuirks.push_back("Use FSR2 Vulkan inputs");
-
-    if (quirks & GameQuirk::ForceBorderlessWhenUsingXeFG)
-        stringQuirks.push_back("Force Borderless when using XeFG");
-
-    if (quirks & GameQuirk::OverrideVsyncWhenUsingXeFG)
-        stringQuirks.push_back("Override Vsync when using XeFG");
-
     if (quirks & GameQuirk::ForceCreateD3D12Device)
         stringQuirks.push_back("Force create D3D12 device for w/Dx12");
 
-    if (quirks & GameQuirk::DisableResizeSkip)
-        stringQuirks.push_back("Disable Resize Skip");
-
-    if (quirks & GameQuirk::SpoofRegistry)
-        stringQuirks.push_back("Spoof Registry");
-
-    if (quirks & GameQuirk::DisableFakenvapi)
-        stringQuirks.push_back("Disable fakenvapi");
-
     if (quirks & GameQuirk::ForceDepthD32S8)
         stringQuirks.push_back("Force depth as D32S8");
-
-    if (quirks & GameQuirk::DoNotPreserveFGSwapChain)
-        stringQuirks.push_back("Don't Preserve FG Swapchain");
-
-    if (quirks & GameQuirk::OldOverlayMenu)
-        stringQuirks.push_back("Using old overlay (draws on upscaled image)");
 
     if (quirks & GameQuirk::PregmataFixDLSSModes)
         stringQuirks.push_back("Fix DLSS quality selection in Pragmata");
@@ -1315,6 +1455,18 @@ static void printQuirks(flag_set<GameQuirk>& quirks)
 
     if (quirks & GameQuirk::CreateSLOnThe2ndDevice)
         stringQuirks.push_back("Create SL on the 2nd device");
+
+    if (quirks & GameQuirk::XeFGCameraMotionFill)
+        stringQuirks.push_back("Fill XeFG input motion vectors with camera motion");
+
+    if (quirks & GameQuirk::DLSSGFrameLatencyWaitable)
+        stringQuirks.push_back("Request frame latency waitable swapchain for DLSSG");
+
+    if (quirks & GameQuirk::HideFsr4)
+        stringQuirks.push_back("Hide FSR 4 from the game's FFX version list");
+
+    if (quirks & GameQuirk::ExtendedSearch)
+        stringQuirks.push_back("Extended DLL search");
 
     state->detectedQuirks.append_range(stringQuirks);
     for (auto& stringQuirk : stringQuirks)
@@ -1346,221 +1498,10 @@ static void CheckQuirks(bool isNvidia)
     }
 #endif
 
-    auto quirks = getQuirksForExe(State::Instance().gameExe);
+    GameConfigContext context;
+    context.isNvidia = isNvidia;
 
-    auto state = &State::Instance();
-
-    // Apply config-level quirks
-    if (quirks & GameQuirk::DisableHudfix && !Config::Instance()->FGDisableHUDFix.has_value() &&
-        Config::Instance()->FGInput.value_or_default() == FGInput::Upscaler)
-        Config::Instance()->FGDisableHUDFix.set_volatile_value(true);
-    else
-        quirks.reset(GameQuirk::DisableHudfix);
-
-    if (quirks & GameQuirk::DisableFSR3Inputs && !Config::Instance()->EnableFsr3Inputs.has_value())
-        Config::Instance()->EnableFsr3Inputs.set_volatile_value(false);
-    else
-        quirks.reset(GameQuirk::DisableFSR3Inputs);
-
-    if (quirks & GameQuirk::DisableFSR2Inputs && !Config::Instance()->EnableFsr2Inputs.has_value())
-        Config::Instance()->EnableFsr2Inputs.set_volatile_value(false);
-    else
-        quirks.reset(GameQuirk::DisableFSR3Inputs);
-
-    if (quirks & GameQuirk::DisableFFXInputs && !Config::Instance()->EnableFfxInputs.has_value())
-        Config::Instance()->EnableFfxInputs.set_volatile_value(false);
-    else
-        quirks.reset(GameQuirk::DisableFFXInputs);
-
-    if (quirks & GameQuirk::DisableDxgiSpoofing && !Config::Instance()->DxgiSpoofing.has_value())
-        Config::Instance()->DxgiSpoofing.set_volatile_value(false);
-    else
-        quirks.reset(GameQuirk::DisableDxgiSpoofing);
-
-    if (quirks & GameQuirk::RestoreComputeSigOnNonNvidia && !isNvidia &&
-        !Config::Instance()->RestoreComputeSignature.has_value())
-    {
-        Config::Instance()->RestoreComputeSignature.set_volatile_value(true);
-    }
-    else
-        quirks.reset(GameQuirk::RestoreComputeSigOnNonNvidia);
-
-    if (quirks & GameQuirk::RestoreComputeSigOnNvidia && isNvidia &&
-        !Config::Instance()->RestoreComputeSignature.has_value())
-    {
-        Config::Instance()->RestoreComputeSignature.set_volatile_value(true);
-    }
-    else
-        quirks.reset(GameQuirk::RestoreComputeSigOnNvidia);
-
-    if (quirks & GameQuirk::ExtendedSigRestore && !Config::Instance()->ExtendedStateRestore.has_value())
-    {
-        Config::Instance()->ExtendedStateRestore.set_volatile_value(true);
-    }
-    else
-        quirks.reset(GameQuirk::ExtendedSigRestore);
-
-    if (quirks & GameQuirk::DisableReactiveMasks)
-        Config::Instance()->DisableReactiveMask.set_volatile_value(true);
-    else
-        quirks.reset(GameQuirk::DisableReactiveMasks);
-
-    if (quirks & GameQuirk::ForceAutoExposure)
-        Config::Instance()->AutoExposure.set_volatile_value(true);
-    else
-        quirks.reset(GameQuirk::ForceAutoExposure);
-
-    if (quirks & GameQuirk::DisableUseFsrInputValues)
-        Config::Instance()->FsrUseFsrInputValues.set_volatile_value(false);
-    else
-        quirks.reset(GameQuirk::DisableUseFsrInputValues);
-
-    if (quirks & GameQuirk::EnableVulkanSpoofing && !isNvidia && !Config::Instance()->VulkanSpoofing.has_value())
-    {
-        Config::Instance()->VulkanSpoofing.set_volatile_value(true);
-    }
-    else
-        quirks.reset(GameQuirk::EnableVulkanSpoofing);
-
-    if (quirks & GameQuirk::EnableVulkanExtensionSpoofing && !isNvidia &&
-        !Config::Instance()->VulkanExtensionSpoofing.has_value())
-    {
-        Config::Instance()->VulkanExtensionSpoofing.set_volatile_value(true);
-    }
-    else
-        quirks.reset(GameQuirk::EnableVulkanExtensionSpoofing);
-
-    if (quirks & GameQuirk::DisableOptiXessPipelineCreation && !Config::Instance()->CreateHeaps.has_value() &&
-        !Config::Instance()->BuildPipelines.has_value())
-    {
-        Config::Instance()->CreateHeaps.set_volatile_value(false);
-        Config::Instance()->BuildPipelines.set_volatile_value(false);
-    }
-    else
-        quirks.reset(GameQuirk::DisableOptiXessPipelineCreation);
-
-    if (quirks & GameQuirk::DontUseNTShared && !Config::Instance()->DontUseNTShared.has_value())
-        Config::Instance()->DontUseNTShared.set_volatile_value(true);
-    else
-        quirks.reset(GameQuirk::DontUseNTShared);
-
-    if (quirks & GameQuirk::DontUseUnrealColorBarriers && !Config::Instance()->ColorResourceBarrier.has_value())
-        Config::Instance()->ColorResourceBarrier.set_volatile_value(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    else
-        quirks.reset(GameQuirk::DontUseUnrealColorBarriers);
-
-    if (quirks & GameQuirk::DontUseUnrealMVBarriers && !Config::Instance()->MVResourceBarrier.has_value())
-        Config::Instance()->MVResourceBarrier.set_volatile_value(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    else
-        quirks.reset(GameQuirk::DontUseUnrealMVBarriers);
-
-    if (quirks & GameQuirk::SkipFirst10Frames && !Config::Instance()->SkipFirstFrames.has_value())
-        Config::Instance()->SkipFirstFrames.set_volatile_value(10);
-    else
-        quirks.reset(GameQuirk::SkipFirst10Frames);
-
-    if (quirks & GameQuirk::DisableVsyncOverride && !Config::Instance()->OverrideVsync.has_value())
-        Config::Instance()->OverrideVsync.set_volatile_value(false);
-    else
-        quirks.reset(GameQuirk::DisableVsyncOverride);
-
-    if (quirks & GameQuirk::DontUseNtDllHooks && !Config::Instance()->UseNtdllHooks.has_value())
-        Config::Instance()->UseNtdllHooks.set_volatile_value(false);
-    else
-        quirks.reset(GameQuirk::DontUseNtDllHooks);
-
-    if (quirks & GameQuirk::UseFSR2PatternMatching && !Config::Instance()->Fsr2Pattern.has_value())
-        Config::Instance()->Fsr2Pattern.set_volatile_value(true);
-    else
-        quirks.reset(GameQuirk::UseFSR2PatternMatching);
-
-    if (quirks & GameQuirk::AlwaysCaptureFSRFGSwapchain &&
-        !Config::Instance()->FGAlwaysCaptureFSRFGSwapchain.has_value())
-    {
-        Config::Instance()->FGAlwaysCaptureFSRFGSwapchain.set_volatile_value(true);
-    }
-    else
-        quirks.reset(GameQuirk::AlwaysCaptureFSRFGSwapchain);
-
-    if (quirks & GameQuirk::AllowedFrameAhead2 && !Config::Instance()->FGAllowedFrameAhead.has_value())
-        Config::Instance()->FGAllowedFrameAhead.set_volatile_value(2);
-    else
-        quirks.reset(GameQuirk::AllowedFrameAhead2);
-
-    if (quirks & GameQuirk::DisableXeFGChecks && !Config::Instance()->FGXeFGIgnoreInitChecks.has_value())
-        Config::Instance()->FGXeFGIgnoreInitChecks.set_volatile_value(true);
-    else
-        quirks.reset(GameQuirk::DisableXeFGChecks);
-
-    if (quirks & GameQuirk::UseFsr2Dx11Inputs && !Config::Instance()->UseFsr2Dx11Inputs.has_value())
-        Config::Instance()->UseFsr2Dx11Inputs.set_volatile_value(true);
-    else
-        quirks.reset(GameQuirk::UseFsr2Dx11Inputs);
-
-    if (quirks & GameQuirk::UseFsr2VulkanInputs && !Config::Instance()->UseFsr2VulkanInputs.has_value())
-        Config::Instance()->UseFsr2VulkanInputs.set_volatile_value(true);
-    else
-        quirks.reset(GameQuirk::UseFsr2VulkanInputs);
-
-    if (quirks & GameQuirk::ForceBorderlessWhenUsingXeFG && !Config::Instance()->FGXeFGForceBorderless.has_value() &&
-        State::Instance().activeFgOutput == FGOutput::XeFG && State::Instance().activeFgInput != FGInput::NoFG &&
-        State::Instance().activeFgInput != FGInput::NvngxFG)
-    {
-        Config::Instance()->FGXeFGForceBorderless.set_volatile_value(true);
-    }
-    else
-        quirks.reset(GameQuirk::ForceBorderlessWhenUsingXeFG);
-
-    if (quirks & GameQuirk::OverrideVsyncWhenUsingXeFG && !Config::Instance()->OverrideVsync.has_value() &&
-        State::Instance().activeFgOutput == FGOutput::XeFG && State::Instance().activeFgInput != FGInput::NoFG &&
-        State::Instance().activeFgInput != FGInput::NvngxFG)
-    {
-        Config::Instance()->OverrideVsync.set_volatile_value(true);
-    }
-    else
-        quirks.reset(GameQuirk::OverrideVsyncWhenUsingXeFG);
-
-    if (quirks & GameQuirk::DisableResizeSkip && !Config::Instance()->FGSkipResizeBuffers.has_value())
-    {
-        Config::Instance()->FGSkipResizeBuffers.set_volatile_value(false);
-    }
-    else
-        quirks.reset(GameQuirk::DisableResizeSkip);
-
-    if (quirks & GameQuirk::SpoofRegistry && !Config::Instance()->SpoofRegistry.has_value())
-    {
-        Config::Instance()->SpoofRegistry.set_volatile_value(true);
-    }
-    else
-        quirks.reset(GameQuirk::SpoofRegistry);
-
-    if (quirks & GameQuirk::DisableFakenvapi && !Config::Instance()->UseFakenvapi.has_value())
-    {
-        Config::Instance()->UseFakenvapi.set_volatile_value(false);
-    }
-    else
-        quirks.reset(GameQuirk::DisableFakenvapi);
-
-    if (quirks & GameQuirk::DoNotPreserveFGSwapChain && !Config::Instance()->FGPreserveSwapChain.has_value())
-    {
-        Config::Instance()->FGPreserveSwapChain.set_volatile_value(false);
-    }
-    else
-        quirks.reset(GameQuirk::DoNotPreserveFGSwapChain);
-
-    if (quirks & GameQuirk::OldOverlayMenu && !Config::Instance()->OverlayMenu.has_value())
-    {
-        Config::Instance()->OverlayMenu.set_volatile_value(false);
-    }
-    else
-        quirks.reset(GameQuirk::OldOverlayMenu);
-
-    if (quirks & GameQuirk::DoNotLoadAmdxc64 && !Config::Instance()->Fsr4DoNotLoadAmdxc64.has_value())
-    {
-        Config::Instance()->Fsr4DoNotLoadAmdxc64.set_volatile_value(true);
-    }
-    else
-        quirks.reset(GameQuirk::DoNotLoadAmdxc64);
+    auto quirks = ApplyGameConfigs(State::Instance().gameExe, context);
 
     // For Luma, we assume if Luma addon in game folder it's used
     const auto dir = Util::ExePath().parent_path();
@@ -1718,25 +1659,30 @@ void CheckMemoryForProxies()
     FfxApiProxy::InitFfxDx12_Denoiser();
     FfxApiProxy::InitFfxDx12_Radiance();
 
+    // Only the game's XeFG already in memory, the one OptiScaler loads next is hooked once the game loads it too
+    auto gameXeFG = KernelBaseProxy::GetModuleHandleW_()(L"libxess_fg.dll");
+
     XeSSProxy::InitXeSS();
     XeSSProxy::InitXeSSDx11();
     XeFGProxy::InitXeFG();
     XeLLProxy::InitXeLL();
-
-    XellHooks::Hook();
+    XeFGInputs::Hook(gameXeFG);
 
     NVNGXProxy::InitNVNGX();
 }
 
 DWORD WINAPI getGpuInfo(LPVOID hModuleVoid)
 {
+    // TODO: dxvk deadlocks when the game and identify gpu calls create at the same time
+    // Sleep(1000);
+
     auto primaryGpu = IdentifyGpu::getPrimaryGpu();
 
     // We don't yet know if the GPU supports FSR 4 so hook any AMD
     if (primaryGpu.vendorId == VendorId::AMD)
         Amdxc64Hooks::Init();
 
-    else if (Config::Instance()->Fsr4ForceModel.value_or_default() == FSR4Support::INT8)
+    else if (IsFsr4Int8(Config::Instance()->Fsr4GpuSupport.value_or_default()))
     {
         // We need spoofing hooks for FFX but want to avoid spoofing for the rest of the game
         if (!Config::Instance()->DxgiSpoofing.value_or_default())
@@ -1765,8 +1711,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     {
         DisableThreadLibraryCalls(hModule);
 
+        // Only a static load runs before the exe entry
+        _staticLoad = lpReserved != nullptr;
+
         HMODULE handle = nullptr;
         OSVERSIONINFOW winVer { 0 };
+
+        State::Instance().startTime = std::chrono::steady_clock::now();
 
         dllModule = hModule;
         exeModule = GetModuleHandle(nullptr);
@@ -1780,14 +1731,14 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
         if (std::filesystem::path mainDllPath(Config::Instance()->MainDllPath.value()); mainDllPath.is_relative())
         {
-            Config::Instance()->MainDllPath.set_volatile_value(Util::ExePath().parent_path() / mainDllPath);
+            Config::Instance()->MainDllPath.set_volatile_value(Util::DllPath().parent_path() / mainDllPath);
         }
 
-        // If path is invalid or doesn't exist, use the exe folder as main
+        // If path is invalid or doesn't exist, use Opti's folder as main
         if (!std::filesystem::exists(Config::Instance()->MainDllPath.value()) ||
             !std::filesystem::is_directory(Config::Instance()->MainDllPath.value()))
         {
-            Config::Instance()->MainDllPath.set_volatile_value(Util::ExePath().parent_path());
+            Config::Instance()->MainDllPath.set_volatile_value(Util::DllPath().parent_path());
         }
 
         // Clean up path
@@ -1826,7 +1777,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
         PrepareLogger();
 
-        spdlog::warn("{0} loaded", VER_PRODUCT_NAME);
+        spdlog::warn("{0} loaded", BuildInfo::ProductName());
         spdlog::warn("---------------------------------");
         spdlog::warn("OptiScaler is freely downloadable from");
         spdlog::warn("GitHub : https://github.com/optiscaler/OptiScaler/releases");
@@ -1836,12 +1787,16 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         spdlog::info("");
         spdlog::info("LogLevel: {}", Config::Instance()->LogLevel.value_or_default());
 
+        CustomProviders::ResolveAll();
+
         spdlog::info("");
         if (Util::GetRealWindowsVersion(winVer))
             spdlog::info("Windows version: {} ({}.{}.{})", Util::GetWindowsName(winVer), winVer.dwMajorVersion,
                          winVer.dwMinorVersion, winVer.dwBuildNumber, winVer.dwPlatformId);
         else
             spdlog::warn("Can't read windows version");
+
+        State::Instance().isWindows10 = winVer.dwMajorVersion == 10 && winVer.dwBuildNumber < 22000;
 
         spdlog::info("");
 
@@ -1862,18 +1817,39 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         State::Instance().activeFgInput = Config::Instance()->FGInput.value_or_default();
         State::Instance().activeFgOutput = Config::Instance()->FGOutput.value_or_default();
         State::Instance().activeFgNvngx = Config::Instance()->FGNvngxReplacement.value_or_default();
+        State::Instance().activeFgNvngxCustom = State::Instance().fgNvngxCustom;
+        State::Instance().activeFsrFgProvider = Config::Instance()->FSRFGProvider.value_or("");
 
         // Ensure valid FG configuration
-        if (State::Instance().activeFgInput != FGInput::NvngxFG && State::Instance().activeFgOutput != FGOutput::DLSSG)
+        if (State::Instance().activeFgOutput == FGOutput::NoFG && State::Instance().activeFgInput != FGInput::NoFG &&
+            State::Instance().activeFgInput != FGInput::NvngxFG &&
+            State::Instance().activeFgInput != FGInput::ForceXeLL)
+        {
+            spdlog::warn("FG Input {} without an FG Output, using none",
+                         magic_enum::enum_name(State::Instance().activeFgInput));
+            State::Instance().activeFgInput = FGInput::NoFG;
+        }
+
+        if (State::Instance().activeFgInput != FGInput::NvngxFG &&
+            State::Instance().activeFgOutput != FGOutput::DLSSG &&
+            State::Instance().activeFgOutput != FGOutput::FlipMeter)
+        {
             State::Instance().activeFgNvngx = FGNvngxReplacement::None;
+        }
 
         if (State::Instance().activeFgInput == FGInput::NvngxFG)
+            State::Instance().activeFgOutput = FGOutput::NoFG;
+
+        // XeFG input to XeFG output runs the game's own XeFG, without OptiScaler's FG pipeline
+        if (XeFGInputs::Passthrough())
             State::Instance().activeFgOutput = FGOutput::NoFG;
 
         // Init Kernel proxies
         NtdllProxy::Init();
         KernelBaseProxy::Init();
         Kernel32Proxy::Init();
+
+        CrashDumps::Init();
 
         // Check for Wine
         spdlog::info("");
@@ -1947,6 +1923,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         };
 
         bool possibleNvidia = isNvidiaViaNvapi();
+        IdentifyGpu::setNvidiaHint(possibleNvidia);
+
+        // Quirks can extend the DLL search
+        spdlog::info("");
+        CheckQuirks(possibleNvidia);
 
         spdlog::info("");
         spdlog::info("Check for DLSS files");
@@ -1954,30 +1935,59 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         auto exePath = Util::ExePath().remove_filename();
         auto optiDllPath = std::filesystem::path(Config::Instance()->MainDllPath.value());
 
+        // Same order as the NGX feature path list
+        std::vector<std::filesystem::path> dllFolders;
+
+        if (Config::Instance()->DLSSFeaturePath.has_value())
+            dllFolders.push_back(Config::Instance()->DLSSFeaturePath.value());
+
+        // Only the game folder is searched recursively
+        auto findDll = [&](const wchar_t* name) -> std::optional<std::filesystem::path>
+        {
+            for (const auto& folder : dllFolders)
+            {
+                std::error_code ec;
+
+                if (auto path = folder / name; std::filesystem::is_regular_file(path, ec))
+                {
+                    LOG_INFO(L"{} found at {}", name, folder.wstring());
+                    return path;
+                }
+            }
+
+            return Util::FindFilePath(exePath, name);
+        };
+
         if (Config::Instance()->NVNGX_DLSS_Library.has_value())
         {
             std::filesystem::path dlssPath(Config::Instance()->NVNGX_DLSS_Library.value());
+            std::error_code ec;
 
-            if (std::filesystem::is_directory(dlssPath) && std::filesystem::exists(dlssPath))
+            // Accepts the dll or its folder
+            if (std::filesystem::is_directory(dlssPath, ec))
+                dlssPath /= L"nvngx_dlss.dll";
+
+            if (std::filesystem::is_regular_file(dlssPath, ec))
             {
-                State::Instance().NVNGX_DLSS_Path = dlssPath;
-                LOG_DEBUG("nvngx_dlss.dll found at {}", dlssPath.string());
+                Config::Instance()->NVNGX_DLSS_Library.set_volatile_value(dlssPath.wstring());
+                State::Instance().NVNGX_DLSS_Path = dlssPath.wstring();
+                dllFolders.push_back(dlssPath.parent_path());
+                LOG_INFO("nvngx_dlss.dll override found at {}", wstring_to_string(dlssPath.wstring()));
+            }
+            else
+            {
+                LOG_WARN("nvngx_dlss.dll override not found at {}, ignoring it", wstring_to_string(dlssPath.wstring()));
+                Config::Instance()->NVNGX_DLSS_Library.reset_volatile();
             }
         }
 
-        if (!State::Instance().NVNGX_DLSS_Path.has_value())
-            State::Instance().NVNGX_DLSS_Path = Util::FindFilePath(optiDllPath, "nvngx_dlss.dll");
+        dllFolders.push_back(optiDllPath);
 
         if (!State::Instance().NVNGX_DLSS_Path.has_value())
-            State::Instance().NVNGX_DLSS_Path = Util::FindFilePath(exePath, "nvngx_dlss.dll");
+            State::Instance().NVNGX_DLSS_Path = findDll(L"nvngx_dlss.dll");
 
-        State::Instance().NVNGX_DLSSD_Path = Util::FindFilePath(optiDllPath, "nvngx_dlssd.dll");
-        if (!State::Instance().NVNGX_DLSSD_Path.has_value())
-            State::Instance().NVNGX_DLSSD_Path = Util::FindFilePath(exePath, "nvngx_dlssd.dll");
-
-        State::Instance().NVNGX_DLSSG_Path = Util::FindFilePath(optiDllPath, "nvngx_dlssg.dll");
-        if (!State::Instance().NVNGX_DLSSG_Path.has_value())
-            State::Instance().NVNGX_DLSSG_Path = Util::FindFilePath(exePath, "nvngx_dlssg.dll");
+        State::Instance().NVNGX_DLSSD_Path = findDll(L"nvngx_dlssd.dll");
+        State::Instance().NVNGX_DLSSG_Path = findDll(L"nvngx_dlssg.dll");
 
         // Not 100% accurate for Nvidia cards without DLSS
         if (Config::Instance()->DLSSEnabled.value_or_default() && possibleNvidia)
@@ -2005,9 +2015,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             Config::Instance()->DLSSEnabled.set_volatile_value(false);
         }
 
-        spdlog::info("");
-        CheckQuirks(possibleNvidia);
-
         // Check for working mode and attach hooks
         spdlog::info("");
         CheckWorkingMode();
@@ -2025,41 +2032,24 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         }
 
         // FSR4 Watermark, overrides environment variable only if set in config
+        // The driver only checks whether the variable exists so disabling has to remove it
         if (Config::Instance()->Fsr4EnableWatermark.has_value())
         {
-            if (Config::Instance()->Fsr4EnableWatermark.value())
-            {
-                _wputenv_s(L"MLSR-WATERMARK", L"1");
-                SetEnvironmentVariableW(L"MLSR-WATERMARK", L"1");
+            Util::SetFlagEnvVar(L"MLSR-WATERMARK", Config::Instance()->Fsr4EnableWatermark.value());
 
-                if (!Config::Instance()->FpsOverlayPosition.has_value())
-                    Config::Instance()->FpsOverlayPosition.set_volatile_value(FpsOverlayPos_TopRight);
-            }
-            else
-            {
-                _wputenv_s(L"MLSR-WATERMARK", L"0");
-                SetEnvironmentVariableW(L"MLSR-WATERMARK", L"0");
-            }
+            if (Config::Instance()->Fsr4EnableWatermark.value() && !Config::Instance()->FpsOverlayPosition.has_value())
+                Config::Instance()->FpsOverlayPosition.set_volatile_value(FpsOverlayPos_TopRight);
         }
 
         if (Config::Instance()->FSRFGEnableWatermark.has_value())
         {
-            if (Config::Instance()->FSRFGEnableWatermark.value())
-            {
-                _wputenv_s(L"MLFI-WATERMARK", L"1");
-                SetEnvironmentVariableW(L"MLFI-WATERMARK", L"1");
+            Util::SetFlagEnvVar(L"MLFI-WATERMARK", Config::Instance()->FSRFGEnableWatermark.value());
 
-                if (!Config::Instance()->FpsOverlayPosition.has_value())
-                    Config::Instance()->FpsOverlayPosition.set_volatile_value(FpsOverlayPos_TopRight);
-            }
-            else
-            {
-                _wputenv_s(L"MLFI-WATERMARK", L"0");
-                SetEnvironmentVariableW(L"MLFI-WATERMARK", L"0");
-            }
+            if (Config::Instance()->FSRFGEnableWatermark.value() && !Config::Instance()->FpsOverlayPosition.has_value())
+                Config::Instance()->FpsOverlayPosition.set_volatile_value(FpsOverlayPos_TopRight);
         }
 
-        // Asi plugins
+        // Asi plugins stay in DllMain, some expect to run before other dlls and the exe's TLS callbacks
         if (Config::Instance()->LoadAsiPlugins.value_or_default())
         {
             spdlog::info("");
@@ -2137,7 +2127,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         spdlog::info("---------------------------------------------");
         spdlog::info("");
 
-        CreateThread(nullptr, 0, getGpuInfo, GetDllNameWModule(&dx12NamesW), 0, nullptr);
+        if (o_ExeEntry == nullptr)
+            CreateThread(nullptr, 0, getGpuInfo, GetDllNameWModule(&dx12NamesW), 0, nullptr);
 
 #ifndef _DEBUG
         if (Config::Instance()->LogLevel.value_or_default() == 0 && Config::Instance()->LogToFile.value_or_default())
