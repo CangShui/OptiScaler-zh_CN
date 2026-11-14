@@ -11,7 +11,8 @@ old = json.loads((BASE / "dict_v10.json").read_text(encoding="utf-8"))
 
 from dict_v11_extra import EXTRA
 
-merged = dict(old)
+existing = BASE / "dict_v11.json"
+merged = json.loads(existing.read_text(encoding="utf-8")) if existing.exists() else dict(old)
 changed = []
 for key, value in EXTRA.items():
     if key in merged and merged[key] != value:
